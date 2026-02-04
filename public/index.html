@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eye to Eye Careers - Candidate Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        function App() {
+            const [activeTab, setActiveTab] = useState('dashboard');
+            const [candidates, setCandidates] = useState([]);
+            const [submissions, setSubmissions] = useState([]);
+            const [alerts, setAlerts] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [selectedPipeline, setSelectedPipeline] = useState(null);
+            const [showUpload, setShowUpload] = useState(false);
+            const [uploadFile, setUploadFile] = useState(null);
+            const [alertFilter, setAlertFilter] = useState('all'); // all, pipeline, npi, pending, confirmed, dismissed
+
+            useEffect(() => { loadData(); }, []);
+
+            // Handle browser back/forward buttons
+            useEffect(() => {
+                const handlePopState = (event) => {
+                    if (event.state) {
+                        setActiveTab(event.state.tab || 'dashboard');
+                        setSelectedPipeline(event.state.pipeline || null);
+                    } else {
+                        setActiveTab('dashboard');
+                        setSelectedPipeline(null);
+                    }
+                };
+                window.addEventListener('popstate', handlePopState);
+                window.history.replaceState({ tab: 'dashboard', pipeline: null }, '', '#dashboard');
+                return () => window.removeEventListener('popstate', handlePopState);
+            }, []);
+
+            const navigateTo = (tab, pipeline = null) => {
+                setActiveTab(tab);
+                setSelectedPipeline(pipeline);
+                const hash = pipeline ? `#${tab}-${pipeline}` : `#${tab}`;
+                window.history.pushState({ tab, pipeline }, '', hash);
+            };
+
+            const loadData = async () => {
+                try {
+                    const [c, s, a] = await Promise.all([
+                        fetch('/api/candidates').then(r => r.json()),
+                        fetch('/api/submissions').then(r => r.json()),
+                        fetch('/api/alerts').then(r => r.json())
+                    ]);
+                    setCandidates(c); setSubmissions(s); setAlerts(a); setLoading(false);
+                } catch (e) { console.error(e); setLoading(false); }
+            };
+
+            const getSubmissionsByStage = (stage) => submissions.filter(s => {
+                const p = (s.pipeline_stage || '').toLowerCase();
+                if (stage === 'ncr') return p.includes('name clear requested');
+                if (stage === 'nc') return p.includes('name cleared') && !p.includes('requested');
+                if (stage === 'sub') return p.includes('submitted');
+                if (stage === 'phone') return p.includes('phone interview');
+                if (stage === 'inperson') return p.includes('in-person') || p.includes('in person');
+                if (stage === 'neg') return p.includes('negotiation');
+                if (stage === 'hired') return p.includes('hired') || p.includes('placed') || p.includes('offer');
+                return false;
+            });
+
+            const getFilteredCandidates = () => {
+                if (!selectedPipeline) return candidates;
+                const ids = getSubmissionsByStage(selectedPipeline).map(s => s.candidate_id);
+                return candidates.filter(c => ids.includes(c.id));
+            };
+
+            const getFilteredAlerts = () => {
+                let filtered = alerts;
+                if (alertFilter === 'pipeline') {
+                    filtered = alerts.filter(a => a.source?.includes('Pipeline'));
+                } else if (alertFilter === 'npi') {
+                    filtered = alerts.filter(a => a.source?.includes('NPI'));
+                } else if (alertFilter === 'pending') {
+                    filtered = alerts.filter(a => a.status === 'pending');
+                } else if (alertFilter === 'confirmed') {
+                    filtered = alerts.filter(a => a.status === 'confirmed');
+                } else if (alertFilter === 'dismissed') {
+                    filtered = alerts.filter(a => a.status === 'dismissed');
+                }
+                return filtered;
+            };
+
+            const stages = [
+                { key: 'ncr', label: 'Name Clear Requested', icon: 'fa-clipboard-check', bg: 'bg-gray-100', border: 'border-gray-300', text: 'text-gray-700' },
+                { key: 'nc', label: 'Name Cleared', icon: 'fa-check', bg: 'bg-blue-100', border: 'border-blue-300', text: 'text-blue-700' },
+                { key: 'sub', label: 'Submitted', icon: 'fa-paper-plane', bg: 'bg-indigo-100', border: 'border-indigo-300', text: 'text-indigo-700' },
+                { key: 'phone', label: 'Phone Interview', icon: 'fa-phone', bg: 'bg-cyan-100', border: 'border-cyan-300', text: 'text-cyan-700' },
+                { key: 'inperson', label: 'In-Person', icon: 'fa-handshake', bg: 'bg-teal-100', border: 'border-teal-300', text: 'text-teal-700' },
+                { key: 'neg', label: 'Negotiation', icon: 'fa-comments-dollar', bg: 'bg-orange-100', border: 'border-orange-300', text: 'text-orange-700' },
+                { key: 'hired', label: 'Hired', icon: 'fa-trophy', bg: 'bg-green-100', border: 'border-green-400', text: 'text-green-700' },
+            ];
+
+            const processCSV = async () => {
+                if (!uploadFile) return alert('Select a file');
+                const formData = new FormData();
+                formData.append('file', uploadFile);
+                const res = await fetch('/api/upload/csv', { method: 'POST', body: formData });
+                const data = await res.json();
+                alert(data.success ? `Imported ${data.candidates} candidates, ${data.submissions} submissions` : 'Error: ' + data.error);
+                setShowUpload(false); setUploadFile(null); loadData();
+            };
+
+            const deleteCandidate = async (id, name) => {
+                if (!confirm(`Delete ${name}?`)) return;
+                await fetch(`/api/candidates/${id}`, { method: 'DELETE' });
+                loadData();
+            };
+
+            const updateAlertStatus = async (alertId, newStatus) => {
+                try {
+                    await fetch(`/api/alerts/${alertId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ status: newStatus })
+                    });
+                    loadData();
+                } catch (e) {
+                    alert('Failed to update alert');
+                }
+            };
+
+            const getSourceBadge = (source) => {
+                if (source?.includes('Pipeline') && source?.includes('Hired')) {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800"><i className="fas fa-check-circle mr-1"></i>CRM: Hired</span>;
+                } else if (source?.includes('Pipeline') && source?.includes('Negotiation')) {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800"><i className="fas fa-handshake mr-1"></i>CRM: Negotiation</span>;
+                } else if (source?.includes('Pipeline')) {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800"><i className="fas fa-database mr-1"></i>CRM Pipeline</span>;
+                } else if (source?.includes('NPI')) {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800"><i className="fas fa-id-card mr-1"></i>NPI Registry</span>;
+                }
+                return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">{source}</span>;
+            };
+
+            const getConfidenceBadge = (confidence) => {
+                if (confidence === 'Confirmed') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-500 text-white">Confirmed</span>;
+                } else if (confidence === 'High') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-orange-500 text-white">High</span>;
+                } else if (confidence === 'Medium') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-yellow-500 text-white">Medium</span>;
+                }
+                return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-500 text-white">{confidence}</span>;
+            };
+
+            const getStatusBadge = (status) => {
+                if (status === 'confirmed') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">✓ Confirmed</span>;
+                } else if (status === 'dismissed') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Dismissed</span>;
+                }
+                return <span className="px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Pending Review</span>;
+            };
+
+            // Calculate totals
+            const totalInPipeline = submissions.length;
+            const pendingAlerts = alerts.filter(a => a.status === 'pending').length;
+
+            if (loading) return <div className="flex items-center justify-center h-screen"><div className="text-xl">Loading...</div></div>;
+
+            return (
+                <div className="min-h-screen">
+                    <header className="bg-white shadow-sm border-b">
+                        <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+                            <div>
+                                <h1 className="text-2xl font-bold text-blue-600"><i className="fas fa-eye mr-2"></i>Eye to Eye Careers</h1>
+                                <p className="text-sm text-gray-600">Candidate Placement Tracker</p>
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={() => setShowUpload(true)} className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"><i className="fas fa-upload mr-2"></i>Upload CSV</button>
+                                <button onClick={() => fetch('/api/sync/loxo', {method:'POST'}).then(() => loadData())} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"><i className="fas fa-sync mr-2"></i>Sync Loxo</button>
+                                <button onClick={() => fetch('/api/monitoring/run', {method:'POST'}).then(r => r.json()).then(d => { alert(`Checked: ${d.checked}, Alerts: ${d.alertsCreated}`); loadData(); })} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"><i className="fas fa-search mr-2"></i>Run Check</button>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div className="max-w-7xl mx-auto px-4 py-6">
+                        <div className="flex gap-4 mb-6 border-b">
+                            {['dashboard', 'candidates', 'alerts'].map(tab => (
+                                <button key={tab} onClick={() => navigateTo(tab)} className={`px-4 py-2 capitalize ${activeTab === tab ? 'border-b-2 border-blue-500 text-blue-600 font-medium' : 'text-gray-600'}`}>
+                                    {tab}
+                                    {tab === 'alerts' && pendingAlerts > 0 && (
+                                        <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-red-500 text-white">{pendingAlerts}</span>
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+
+                        {activeTab === 'dashboard' && (
+                            <div>
+                                {/* Summary Stats */}
+                                <div className="grid grid-cols-3 gap-4 mb-6">
+                                    <div className="bg-white p-4 rounded-lg shadow border-l-4 border-blue-500">
+                                        <p className="text-gray-500 text-sm">Total Candidates</p>
+                                        <p className="text-3xl font-bold text-blue-600">{candidates.length}</p>
+                                    </div>
+                                    <div className="bg-white p-4 rounded-lg shadow border-l-4 border-green-500">
+                                        <p className="text-gray-500 text-sm">Total in Pipeline</p>
+                                        <p className="text-3xl font-bold text-green-600">{totalInPipeline}</p>
+                                    </div>
+                                    <div className="bg-white p-4 rounded-lg shadow border-l-4 border-yellow-500 cursor-pointer hover:shadow-lg" onClick={() => navigateTo('alerts')}>
+                                        <p className="text-gray-500 text-sm">Pending Alerts</p>
+                                        <p className="text-3xl font-bold text-yellow-600">{pendingAlerts}</p>
+                                    </div>
+                                </div>
+
+                                <h2 className="text-xl font-bold mb-2">Pipeline Stages</h2>
+                                <p className="text-sm text-gray-500 mb-4">Click a stage to view candidates</p>
+                                <div className="grid grid-cols-7 gap-3">
+                                    {stages.map(s => {
+                                        const stageSubmissions = getSubmissionsByStage(s.key);
+                                        const uniqueCandidates = [...new Set(stageSubmissions.map(sub => sub.candidate_id))].length;
+                                        return (
+                                            <div key={s.key} onClick={() => navigateTo('candidates', s.key)} className={`${s.bg} border-2 ${s.border} p-4 rounded-xl text-center cursor-pointer hover:shadow-lg transition transform hover:scale-105`}>
+                                                <i className={`fas ${s.icon} text-2xl ${s.text} mb-2`}></i>
+                                                <p className={`text-xs font-medium ${s.text}`}>{s.label}</p>
+                                                <p className={`text-3xl font-bold ${s.text}`}>{stageSubmissions.length}</p>
+                                                <p className={`text-xs ${s.text} opacity-70`}>{uniqueCandidates} candidate{uniqueCandidates !== 1 ? 's' : ''}</p>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'candidates' && (
+                            <div>
+                                <div className="flex justify-between items-center mb-4">
+                                    <div>
+                                        <h2 className="text-xl font-bold">{selectedPipeline ? stages.find(s => s.key === selectedPipeline)?.label : 'All Candidates'}</h2>
+                                        {selectedPipeline && <button onClick={() => navigateTo('candidates')} className="text-sm text-blue-600"><i className="fas fa-arrow-left mr-1"></i>Show all</button>}
+                                        <p className="text-sm text-gray-500">{getFilteredCandidates().length} candidate{getFilteredCandidates().length !== 1 ? 's' : ''}</p>
+                                    </div>
+                                </div>
+                                <div className="bg-white rounded-lg shadow overflow-x-auto">
+                                    <table className="min-w-full">
+                                        <thead className="bg-gray-50">
+                                            <tr>
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Client</th>
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Pipeline</th>
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">LinkedIn</th>
+                                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y">
+                                            {getFilteredCandidates().map((c, index) => {
+                                                const sub = submissions.find(s => s.candidate_id === c.id);
+                                                return (
+                                                    <tr key={c.id} className="hover:bg-gray-50">
+                                                        <td className="px-4 py-3 text-sm text-gray-400">{index + 1}</td>
+                                                        <td className="px-4 py-3 font-medium">{c.full_name}</td>
+                                                        <td className="px-4 py-3 text-sm text-gray-500">{sub?.client_name || 'N/A'}</td>
+                                                        <td className="px-4 py-3"><span className="px-2 py-1 rounded-full text-xs bg-gray-100">{sub?.pipeline_stage || 'N/A'}</span></td>
+                                                        <td className="px-4 py-3 text-sm text-gray-500">{c.npi_number || 'N/A'}</td>
+                                                        <td className="px-4 py-3 text-sm">{c.linkedin_url ? <a href={c.linkedin_url} target="_blank" className="text-blue-600">View</a> : 'N/A'}</td>
+                                                        <td className="px-4 py-3 text-right"><button onClick={() => deleteCandidate(c.id, c.full_name)} className="text-red-600"><i className="fas fa-trash"></i></button></td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                    {getFilteredCandidates().length === 0 && <div className="p-8 text-center text-gray-500">No candidates found</div>}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'alerts' && (
+                            <div>
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-xl font-bold">Alerts ({getFilteredAlerts().length})</h2>
+                                    <div className="flex gap-2">
+                                        <select 
+                                            value={alertFilter} 
+                                            onChange={(e) => setAlertFilter(e.target.value)}
+                                            className="px-3 py-2 border rounded-lg text-sm"
+                                        >
+                                            <option value="all">All Alerts</option>
+                                            <option value="pending">Pending Review</option>
+                                            <option value="confirmed">Confirmed</option>
+                                            <option value="dismissed">Dismissed</option>
+                                            <option value="pipeline">Source: CRM Pipeline</option>
+                                            <option value="npi">Source: NPI Registry</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                {/* Alert Stats */}
+                                <div className="grid grid-cols-5 gap-3 mb-6">
+                                    <div onClick={() => setAlertFilter('all')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'all' ? 'bg-blue-100 border-2 border-blue-400' : 'bg-white border'}`}>
+                                        <p className="text-xs text-gray-500">Total</p>
+                                        <p className="text-xl font-bold">{alerts.length}</p>
+                                    </div>
+                                    <div onClick={() => setAlertFilter('pending')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'pending' ? 'bg-yellow-100 border-2 border-yellow-400' : 'bg-white border'}`}>
+                                        <p className="text-xs text-gray-500">Pending</p>
+                                        <p className="text-xl font-bold text-yellow-600">{alerts.filter(a => a.status === 'pending').length}</p>
+                                    </div>
+                                    <div onClick={() => setAlertFilter('confirmed')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'confirmed' ? 'bg-green-100 border-2 border-green-400' : 'bg-white border'}`}>
+                                        <p className="text-xs text-gray-500">Confirmed</p>
+                                        <p className="text-xl font-bold text-green-600">{alerts.filter(a => a.status === 'confirmed').length}</p>
+                                    </div>
+                                    <div onClick={() => setAlertFilter('pipeline')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'pipeline' ? 'bg-blue-100 border-2 border-blue-400' : 'bg-white border'}`}>
+                                        <p className="text-xs text-gray-500">From CRM</p>
+                                        <p className="text-xl font-bold text-blue-600">{alerts.filter(a => a.source?.includes('Pipeline')).length}</p>
+                                    </div>
+                                    <div onClick={() => setAlertFilter('npi')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'npi' ? 'bg-purple-100 border-2 border-purple-400' : 'bg-white border'}`}>
+                                        <p className="text-xs text-gray-500">From NPI</p>
+                                        <p className="text-xl font-bold text-purple-600">{alerts.filter(a => a.source?.includes('NPI')).length}</p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-3">
+                                    {getFilteredAlerts().length === 0 ? (
+                                        <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
+                                            <i className="fas fa-check-circle text-4xl text-green-400 mb-4"></i>
+                                            <p>No alerts match this filter.</p>
+                                        </div>
+                                    ) : (
+                                        getFilteredAlerts().map(a => (
+                                            <div key={a.id} className={`bg-white p-4 rounded-lg shadow border-l-4 ${
+                                                a.status === 'confirmed' ? 'border-green-500' : 
+                                                a.status === 'dismissed' ? 'border-gray-300' : 
+                                                'border-yellow-500'
+                                            }`}>
+                                                <div className="flex justify-between items-start">
+                                                    <div className="flex-1">
+                                                        <div className="flex items-center gap-2 mb-2">
+                                                            <h3 className="font-bold text-lg">{a.candidate_name}</h3>
+                                                            {getStatusBadge(a.status)}
+                                                        </div>
+                                                        <p className="text-gray-600 mb-2">{a.match_details}</p>
+                                                        <div className="flex gap-2 flex-wrap">
+                                                            {getSourceBadge(a.source)}
+                                                            {getConfidenceBadge(a.confidence)}
+                                                            <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-600">
+                                                                <i className="fas fa-building mr-1"></i>{a.client_name}
+                                                            </span>
+                                                            <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-600">
+                                                                <i className="fas fa-calendar mr-1"></i>{new Date(a.created_at).toLocaleDateString()}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                    {a.status === 'pending' && (
+                                                        <div className="flex gap-2 ml-4">
+                                                            <button 
+                                                                onClick={() => updateAlertStatus(a.id, 'confirmed')}
+                                                                className="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
+                                                            >
+                                                                <i className="fas fa-check mr-1"></i>Confirm
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => updateAlertStatus(a.id, 'dismissed')}
+                                                                className="px-3 py-1 bg-gray-400 text-white rounded hover:bg-gray-500 text-sm"
+                                                            >
+                                                                <i className="fas fa-times mr-1"></i>Dismiss
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                    {a.status !== 'pending' && (
+                                                        <button 
+                                                            onClick={() => updateAlertStatus(a.id, 'pending')}
+                                                            className="px-3 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300 text-sm ml-4"
+                                                        >
+                                                            <i className="fas fa-undo mr-1"></i>Reset
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {showUpload && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
+                            <div className="bg-white rounded-lg p-6 w-96">
+                                <h2 className="text-xl font-bold mb-4">Upload CSV</h2>
+                                <input type="file" accept=".csv" onChange={e => setUploadFile(e.target.files[0])} className="mb-4 w-full" />
+                                <div className="flex gap-2">
+                                    <button onClick={() => setShowUpload(false)} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
+                                    <button onClick={processCSV} className="px-4 py-2 bg-purple-600 text-white rounded">Upload</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
