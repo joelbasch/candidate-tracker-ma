@@ -1,10 +1,13 @@
 /**
- * Monitoring Scheduler
- * Checks candidates against NPI registry and creates alerts for matches
- * Matches based on: employer name, parent/subsidiary, AND location
+ * Monitoring Scheduler - FULL VERSION
+ * Checks candidates against:
+ * - NPI Registry (location + employer matching)
+ * - LinkedIn profiles (via Serper.dev)
+ * - Google Search (via Serper.dev)
  */
 
 const CompanyResearchService = require('./companyResearchService');
+const GoogleSearchService = require('./googleSearchService');
 
 class MonitoringScheduler {
   constructor(db, npiService, linkedinService, socialMediaService) {
@@ -13,6 +16,7 @@ class MonitoringScheduler {
     this.linkedin = linkedinService;
     this.socialMedia = socialMediaService;
     this.companyResearch = new CompanyResearchService();
+    this.googleSearch = new GoogleSearchService();
     this.isRunning = false;
   }
 
@@ -294,11 +298,142 @@ class MonitoringScheduler {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
 
+      // Now check LinkedIn and Google Search for each candidate
+      console.log(`\n--- Checking LinkedIn & Google Search ---`);
+      results.linkedinAlerts = 0;
+      results.googleAlerts = 0;
+
+      for (const candidate of candidates) {
+        const candidateSubmissions = submissions.filter(s => s.candidate_id === candidate.id);
+
+        if (candidateSubmissions.length === 0) {
+          continue;
+        }
+
+        console.log(`\n──────────────────────────────────────────────────────────────────────`);
+        console.log(`Checking: ${candidate.full_name}`);
+        console.log(`──────────────────────────────────────────────────────────────────────`);
+
+        for (const submission of candidateSubmissions) {
+          const clientName = submission.client_name || '';
+
+          console.log(`  🎯 Checking against client: "${clientName}"`);
+
+          // LinkedIn Check
+          if (this.linkedin && this.linkedin.configured) {
+            try {
+              console.log(`\n  💼 LINKEDIN: "${candidate.full_name}"`);
+              const linkedinProfile = await this.linkedin.findProfile(candidate.full_name);
+
+              if (linkedinProfile && linkedinProfile.found) {
+                console.log(`    ✅ Found LinkedIn: ${linkedinProfile.profileUrl}`);
+                if (linkedinProfile.currentEmployer) {
+                  console.log(`    🏢 Current Employer: ${linkedinProfile.currentEmployer}`);
+                }
+
+                // Check if LinkedIn mentions the client
+                const linkedinMatch = this.linkedin.checkProfileForClient(linkedinProfile, clientName, this.companyResearch);
+
+                if (linkedinMatch && linkedinMatch.match) {
+                  const existingAlert = (this.db.data.alerts || []).find(a =>
+                    a.candidate_id === candidate.id &&
+                    a.client_name === clientName &&
+                    a.source?.includes('LinkedIn')
+                  );
+
+                  if (!existingAlert) {
+                    console.log(`    🚨 LINKEDIN MATCH: ${linkedinMatch.reason}`);
+
+                    const alert = {
+                      id: Date.now() + Math.random(),
+                      candidate_id: candidate.id,
+                      candidate_name: candidate.full_name,
+                      client_name: clientName,
+                      source: 'LinkedIn',
+                      confidence: linkedinMatch.confidence || 'Medium',
+                      match_details: linkedinMatch.reason,
+                      linkedin_url: linkedinProfile.profileUrl,
+                      status: 'pending',
+                      created_at: new Date().toISOString()
+                    };
+
+                    if (!this.db.data.alerts) this.db.data.alerts = [];
+                    this.db.data.alerts.push(alert);
+                    results.alertsCreated++;
+                    results.linkedinAlerts++;
+                    this.db.saveDatabase();
+                  }
+                }
+              } else {
+                console.log(`    ℹ️ No LinkedIn profile found`);
+              }
+            } catch (error) {
+              console.log(`    ⚠️ LinkedIn error: ${error.message}`);
+            }
+          }
+
+          // Google Search Check
+          if (this.googleSearch && this.googleSearch.apiKey) {
+            try {
+              console.log(`\n  🌐 GOOGLE SEARCH: "${candidate.full_name}"`);
+              const searchResults = await this.googleSearch.searchCandidate(candidate.full_name);
+
+              if (searchResults && searchResults.allResults && searchResults.allResults.length > 0) {
+                console.log(`    ✅ Found ${searchResults.allResults.length} search results`);
+
+                // Check if Google results mention the client
+                const googleMatch = this.googleSearch.checkResultsForClient(searchResults, clientName, this.companyResearch);
+
+                if (googleMatch && googleMatch.match) {
+                  const existingAlert = (this.db.data.alerts || []).find(a =>
+                    a.candidate_id === candidate.id &&
+                    a.client_name === clientName &&
+                    a.source?.includes('Google')
+                  );
+
+                  if (!existingAlert) {
+                    console.log(`    🚨 GOOGLE MATCH: ${googleMatch.reason}`);
+
+                    const alert = {
+                      id: Date.now() + Math.random(),
+                      candidate_id: candidate.id,
+                      candidate_name: candidate.full_name,
+                      client_name: clientName,
+                      source: 'Google Search',
+                      confidence: 'Medium',
+                      match_details: googleMatch.reason,
+                      source_url: googleMatch.sourceUrl,
+                      status: 'pending',
+                      created_at: new Date().toISOString()
+                    };
+
+                    if (!this.db.data.alerts) this.db.data.alerts = [];
+                    this.db.data.alerts.push(alert);
+                    results.alertsCreated++;
+                    results.googleAlerts++;
+                    this.db.saveDatabase();
+                  }
+                }
+              } else {
+                console.log(`    ℹ️ No Google Search results`);
+              }
+            } catch (error) {
+              console.log(`    ⚠️ Google Search error: ${error.message}`);
+            }
+          }
+
+          // Rate limit between candidates
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+
       console.log(`\n========== Monitoring Complete ==========`);
       console.log(`Candidates checked: ${results.checked}`);
       console.log(`NPI numbers updated: ${results.npiUpdated}`);
       console.log(`Pipeline alerts created: ${results.pipelineAlerts}`);
       console.log(`NPI location/employer alerts created: ${results.npiAlerts}`);
+      console.log(`LinkedIn alerts created: ${results.linkedinAlerts || 0}`);
+      console.log(`Google Search alerts created: ${results.googleAlerts || 0}`);
       console.log(`Total alerts created: ${results.alertsCreated}`);
       console.log(`=========================================\n`);
 
