@@ -1,13 +1,21 @@
 /**
- * Monitoring Scheduler - FULL VERSION
- * Checks candidates against:
- * - NPI Registry (location + employer matching)
- * - LinkedIn profiles (via Serper.dev)
- * - Google Search (via Serper.dev)
+ * Monitoring Scheduler - COMPREHENSIVE VERSION
+ * Eye to Eye Careers - Candidate Placement Tracker
+ *
+ * INDEPENDENT ALERT SOURCES:
+ * 1. NPI Registry (NPPES + CMS Medicare) - Primary source for practice locations
+ * 2. LinkedIn - Professional profiles (US + Optometrist filtered)
+ * 3. Doximity - Medical professional network
+ * 4. Healthgrades - Healthcare provider directory
+ * 5. Google Search - General web presence
+ *
+ * Each source generates INDEPENDENT alerts that appear in separate tabs in the UI
  */
 
 const CompanyResearchService = require('./companyResearchService');
 const GoogleSearchService = require('./googleSearchService');
+const DoximityService = require('./doximityService');
+const HealthgradesService = require('./healthgradesService');
 
 class MonitoringScheduler {
   constructor(db, npiService, linkedinService, socialMediaService) {
@@ -17,19 +25,19 @@ class MonitoringScheduler {
     this.socialMedia = socialMediaService;
     this.companyResearch = new CompanyResearchService();
     this.googleSearch = new GoogleSearchService();
+    this.doximity = new DoximityService();
+    this.healthgrades = new HealthgradesService();
     this.isRunning = false;
   }
 
   /**
    * Extract city and state from a job title or location string
-   * e.g., "Optometrist - Full Time - Rockford, IL" -> { city: "rockford", state: "il" }
    */
   extractLocation(text) {
     if (!text) return { city: null, state: null };
-    
+
     const normalized = text.toLowerCase();
-    
-    // Common state abbreviations
+
     const states = {
       'al': 'alabama', 'ak': 'alaska', 'az': 'arizona', 'ar': 'arkansas', 'ca': 'california',
       'co': 'colorado', 'ct': 'connecticut', 'de': 'delaware', 'fl': 'florida', 'ga': 'georgia',
@@ -47,18 +55,15 @@ class MonitoringScheduler {
     let city = null;
     let state = null;
 
-    // Try to find "City, ST" pattern
     const cityStatePattern = /([a-z\s]+),\s*([a-z]{2})\b/gi;
     const matches = [...normalized.matchAll(cityStatePattern)];
-    
+
     if (matches.length > 0) {
-      // Take the last match (usually the actual location, not part of company name)
       const lastMatch = matches[matches.length - 1];
       city = lastMatch[1].trim();
       state = lastMatch[2].trim();
     }
 
-    // Also check for full state names
     for (const [abbrev, fullName] of Object.entries(states)) {
       if (normalized.includes(fullName)) {
         state = abbrev;
@@ -70,42 +75,8 @@ class MonitoringScheduler {
   }
 
   /**
-   * Check if two locations match
+   * Main monitoring workflow - runs all independent checks
    */
-  locationsMatch(loc1, loc2) {
-    if (!loc1 || !loc2) return { match: false };
-    
-    const city1 = (loc1.city || '').toLowerCase().trim();
-    const state1 = (loc1.state || '').toLowerCase().trim();
-    const city2 = (loc2.city || '').toLowerCase().trim();
-    const state2 = (loc2.state || '').toLowerCase().trim();
-
-    // Must have at least state to compare
-    if (!state1 || !state2) return { match: false };
-
-    // State must match
-    if (state1 !== state2) return { match: false };
-
-    // If we have cities, check if they match or are close
-    if (city1 && city2) {
-      // Exact city match
-      if (city1 === city2) {
-        return { match: true, reason: `Same city: ${city1}, ${state1.toUpperCase()}` };
-      }
-      
-      // One contains the other (for cases like "Kansas City" vs "Kansas City Metro")
-      if (city1.includes(city2) || city2.includes(city1)) {
-        return { match: true, reason: `City match: ${city1} / ${city2}, ${state1.toUpperCase()}` };
-      }
-      
-      // Cities are different but same state - lower confidence
-      return { match: true, reason: `Same state (${state1.toUpperCase()}), different city: ${city1} vs ${city2}`, confidence: 'Medium' };
-    }
-
-    // Only state matches
-    return { match: true, reason: `Same state: ${state1.toUpperCase()}`, confidence: 'Low' };
-  }
-
   async runMonitoring() {
     if (this.isRunning) {
       return { checked: 0, alertsCreated: 0, message: 'Already running' };
@@ -114,328 +85,408 @@ class MonitoringScheduler {
     this.isRunning = true;
     const results = {
       checked: 0,
-      npiUpdated: 0,
       alertsCreated: 0,
-      pipelineAlerts: 0,
-      npiAlerts: 0
+      bySource: {
+        pipeline: 0,
+        npi: 0,
+        linkedin: 0,
+        doximity: 0,
+        healthgrades: 0,
+        google: 0
+      }
     };
 
     try {
       const candidates = this.db.data.candidates || [];
       const submissions = this.db.data.submissions || [];
 
-      console.log(`\n========== Starting Monitoring ==========`);
+      console.log(`\n${'='.repeat(70)}`);
+      console.log(`  COMPREHENSIVE MONITORING - ${new Date().toLocaleString()}`);
+      console.log(`${'='.repeat(70)}`);
       console.log(`Total candidates: ${candidates.length}`);
       console.log(`Total submissions: ${submissions.length}`);
 
-      // First, create alerts for Hired and Negotiation candidates (from CRM pipeline)
-      console.log(`\n--- Checking Pipeline Stages for Alerts ---`);
-      
+      // =========================================
+      // PHASE 1: Pipeline Stage Alerts
+      // =========================================
+      console.log(`\n${'─'.repeat(70)}`);
+      console.log(`  PHASE 1: Pipeline Stage Alerts`);
+      console.log(`${'─'.repeat(70)}`);
+
       for (const submission of submissions) {
         const stage = (submission.pipeline_stage || '').toLowerCase();
         const candidate = candidates.find(c => c.id === submission.candidate_id);
-        
+
         if (!candidate) continue;
 
         const isHired = stage.includes('hired') || stage.includes('placed') || stage.includes('started');
         const isNegotiation = stage.includes('negotiation') || stage.includes('offer');
-        
+
         if (isHired || isNegotiation) {
-          const existingAlert = (this.db.data.alerts || []).find(a => 
-            a.candidate_id === candidate.id && 
+          const existingAlert = (this.db.data.alerts || []).find(a =>
+            a.candidate_id === candidate.id &&
             a.client_name === submission.client_name &&
-            a.source?.includes('Pipeline')
+            a.source === 'Pipeline'
           );
 
           if (!existingAlert) {
             const alertType = isHired ? 'HIRED' : 'NEGOTIATION';
-            console.log(`  🚨 Creating ${alertType} alert: ${candidate.full_name} → ${submission.client_name}`);
-            
-            const alert = {
-              id: Date.now() + Math.random(),
+            console.log(`  🚨 ${alertType}: ${candidate.full_name} → ${submission.client_name}`);
+
+            this.createAlert({
               candidate_id: candidate.id,
               candidate_name: candidate.full_name,
               client_name: submission.client_name,
-              source: `Pipeline: ${submission.pipeline_stage}`,
+              source: 'Pipeline',
               confidence: isHired ? 'Confirmed' : 'High',
-              match_details: isHired 
+              match_details: isHired
                 ? `${candidate.full_name} was HIRED at ${submission.client_name} - ${submission.job_title}`
-                : `${candidate.full_name} is in NEGOTIATION with ${submission.client_name} - ${submission.job_title}`,
-              status: 'pending',
-              created_at: new Date().toISOString()
-            };
+                : `${candidate.full_name} is in NEGOTIATION with ${submission.client_name} - ${submission.job_title}`
+            });
 
-            if (!this.db.data.alerts) this.db.data.alerts = [];
-            this.db.data.alerts.push(alert);
             results.alertsCreated++;
-            results.pipelineAlerts++;
+            results.bySource.pipeline++;
           }
         }
       }
 
-      if (results.pipelineAlerts > 0) {
-        this.db.saveDatabase();
-        console.log(`  Created ${results.pipelineAlerts} pipeline alerts`);
-      }
+      // =========================================
+      // PHASE 2: NPI Registry (NPPES + CMS Medicare)
+      // =========================================
+      console.log(`\n${'─'.repeat(70)}`);
+      console.log(`  PHASE 2: NPI Registry (NPPES + CMS Medicare)`);
+      console.log(`${'─'.repeat(70)}`);
 
-      // Now check NPI registry for each candidate
-      console.log(`\n--- Checking NPI Registry (Location + Employer Matching) ---`);
-      
       for (const candidate of candidates) {
         results.checked++;
-        
-        const candidateSubmissions = submissions.filter(s => s.candidate_id === candidate.id);
-        
-        if (candidateSubmissions.length === 0) {
-          continue;
-        }
-
-        try {
-          const npiResults = await this.npi.searchByName(candidate.full_name);
-
-          if (!npiResults || npiResults.length === 0) {
-            continue;
-          }
-
-          // Look for optometrist/ophthalmologist matches first
-          const relevantProvider = npiResults.find(r => {
-            const desc = (r.taxonomy?.description || '').toLowerCase();
-            return desc.includes('optometr') || desc.includes('ophthalm') || desc.includes('optic');
-          }) || npiResults[0];
-
-          if (relevantProvider) {
-            // Update candidate's NPI if not set
-            if (!candidate.npi_number && relevantProvider.npi) {
-              candidate.npi_number = relevantProvider.npi;
-              candidate.npi_last_checked = new Date().toISOString();
-              results.npiUpdated++;
-              this.db.saveDatabase();
-            }
-
-            // Get NPI location
-            const npiAddress = relevantProvider.practiceAddress || {};
-            const npiLocation = {
-              city: (npiAddress.city || '').toLowerCase(),
-              state: (npiAddress.state || '').toLowerCase()
-            };
-            const employerName = relevantProvider.organizationName || '';
-
-            // Check each submission for matches
-            for (const submission of candidateSubmissions) {
-              const clientName = submission.client_name || '';
-              const jobTitle = submission.job_title || '';
-              
-              // Extract location from job title
-              const jobLocation = this.extractLocation(jobTitle);
-              
-              // Also try to extract from client name
-              const clientLocation = this.extractLocation(clientName);
-              
-              // Check for employer name match
-              const employerMatch = this.companyResearch.areCompaniesRelated(employerName, clientName);
-              
-              // Check for location match
-              const locationMatchJob = this.locationsMatch(npiLocation, jobLocation);
-              const locationMatchClient = this.locationsMatch(npiLocation, clientLocation);
-              const locationMatch = locationMatchJob.match ? locationMatchJob : locationMatchClient;
-
-              // Create alert if employer matches OR location matches
-              if (employerMatch.match || locationMatch.match) {
-                const existingAlert = (this.db.data.alerts || []).find(a =>
-                  a.candidate_id === candidate.id &&
-                  a.client_name === submission.client_name &&
-                  a.source?.includes('NPI')
-                );
-
-                if (!existingAlert) {
-                  let matchReason = '';
-                  let confidence = 'Medium';
-                  
-                  if (employerMatch.match && locationMatch.match) {
-                    matchReason = `Employer AND Location match! NPI shows ${relevantProvider.fullName} at "${employerName}" in ${npiLocation.city}, ${npiLocation.state.toUpperCase()}`;
-                    confidence = 'High';
-                  } else if (employerMatch.match) {
-                    matchReason = `Employer match: ${employerMatch.reason}`;
-                    confidence = 'High';
-                  } else if (locationMatch.match) {
-                    matchReason = `Location match: NPI shows practice in ${npiLocation.city}, ${npiLocation.state.toUpperCase()}. ${locationMatch.reason}`;
-                    confidence = locationMatch.confidence || 'Medium';
-                  }
-
-                  console.log(`  🚨 NPI MATCH: ${candidate.full_name}`);
-                  console.log(`      NPI: ${relevantProvider.npi} - ${npiLocation.city}, ${npiLocation.state.toUpperCase()}`);
-                  console.log(`      Job: ${jobTitle}`);
-                  console.log(`      Reason: ${matchReason}`);
-                  
-                  const alert = {
-                    id: Date.now() + Math.random(),
-                    candidate_id: candidate.id,
-                    candidate_name: candidate.full_name,
-                    client_name: submission.client_name,
-                    source: 'NPI Registry',
-                    confidence: confidence,
-                    match_details: `NPI ${relevantProvider.npi} shows ${relevantProvider.fullName} practicing in ${npiLocation.city || 'Unknown'}, ${(npiLocation.state || 'Unknown').toUpperCase()}. ${matchReason}`,
-                    npi_number: relevantProvider.npi,
-                    npi_location: `${npiLocation.city}, ${npiLocation.state}`.toUpperCase(),
-                    status: 'pending',
-                    created_at: new Date().toISOString()
-                  };
-
-                  if (!this.db.data.alerts) this.db.data.alerts = [];
-                  this.db.data.alerts.push(alert);
-                  results.alertsCreated++;
-                  results.npiAlerts++;
-                  this.db.saveDatabase();
-                }
-              }
-            }
-          }
-        } catch (error) {
-          console.log(`  Error checking NPI for ${candidate.full_name}: ${error.message}`);
-        }
-
-        // Small delay to avoid overwhelming the NPI API
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      // Now check LinkedIn and Google Search for each candidate
-      console.log(`\n--- Checking LinkedIn & Google Search ---`);
-      results.linkedinAlerts = 0;
-      results.googleAlerts = 0;
-
-      for (const candidate of candidates) {
         const candidateSubmissions = submissions.filter(s => s.candidate_id === candidate.id);
 
-        if (candidateSubmissions.length === 0) {
-          continue;
-        }
+        if (candidateSubmissions.length === 0) continue;
 
-        console.log(`\n──────────────────────────────────────────────────────────────────────`);
-        console.log(`Checking: ${candidate.full_name}`);
-        console.log(`──────────────────────────────────────────────────────────────────────`);
+        console.log(`\n  📋 ${candidate.full_name}`);
 
         for (const submission of candidateSubmissions) {
           const clientName = submission.client_name || '';
 
-          console.log(`  🎯 Checking against client: "${clientName}"`);
+          // Check for existing NPI alert
+          const existingAlert = (this.db.data.alerts || []).find(a =>
+            a.candidate_id === candidate.id &&
+            a.client_name === clientName &&
+            a.source === 'NPI'
+          );
 
-          // LinkedIn Check
-          if (this.linkedin && this.linkedin.configured) {
-            try {
-              console.log(`\n  💼 LINKEDIN: "${candidate.full_name}"`);
-              const linkedinProfile = await this.linkedin.findProfile(candidate.full_name);
+          if (existingAlert) continue;
 
-              if (linkedinProfile && linkedinProfile.found) {
-                console.log(`    ✅ Found LinkedIn: ${linkedinProfile.profileUrl}`);
-                if (linkedinProfile.currentEmployer) {
-                  console.log(`    🏢 Current Employer: ${linkedinProfile.currentEmployer}`);
-                }
+          try {
+            const npiAlert = await this.npi.checkCandidateAtClient(candidate, submission, this.companyResearch);
 
-                // Check if LinkedIn mentions the client
+            if (npiAlert) {
+              console.log(`     🚨 NPI MATCH: ${npiAlert.employerFound} → ${clientName}`);
+
+              this.createAlert({
+                candidate_id: candidate.id,
+                candidate_name: candidate.full_name,
+                client_name: clientName,
+                source: 'NPI',
+                confidence: npiAlert.confidence,
+                match_details: npiAlert.matchDetails,
+                npi_number: npiAlert.npiNumber,
+                npi_employer: npiAlert.employerFound,
+                npi_address: npiAlert.address,
+                npi_registry_url: npiAlert.links?.npiRegistry,
+                cms_lookup_url: npiAlert.links?.cmsLookup,
+                data_source: npiAlert.dataSource
+              });
+
+              results.alertsCreated++;
+              results.bySource.npi++;
+
+              // Update candidate NPI if found
+              if (npiAlert.npiNumber && !candidate.npi_number) {
+                candidate.npi_number = npiAlert.npiNumber;
+                this.db.saveDatabase();
+              }
+            }
+          } catch (error) {
+            console.log(`     ⚠️ NPI error: ${error.message}`);
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+
+      // =========================================
+      // PHASE 3: LinkedIn (US + Optometrist filtered)
+      // =========================================
+      console.log(`\n${'─'.repeat(70)}`);
+      console.log(`  PHASE 3: LinkedIn (US + Optometrist filtered)`);
+      console.log(`${'─'.repeat(70)}`);
+
+      if (this.linkedin && this.linkedin.configured) {
+        for (const candidate of candidates) {
+          const candidateSubmissions = submissions.filter(s => s.candidate_id === candidate.id);
+
+          if (candidateSubmissions.length === 0) continue;
+
+          console.log(`\n  💼 ${candidate.full_name}`);
+
+          try {
+            const linkedinProfile = await this.linkedin.findProfile(candidate.full_name);
+
+            if (linkedinProfile && linkedinProfile.found) {
+              console.log(`     ✅ Found: ${linkedinProfile.profileUrl}`);
+              if (linkedinProfile.currentEmployer) {
+                console.log(`     🏢 Employer: ${linkedinProfile.currentEmployer}`);
+              }
+
+              for (const submission of candidateSubmissions) {
+                const clientName = submission.client_name || '';
+
+                const existingAlert = (this.db.data.alerts || []).find(a =>
+                  a.candidate_id === candidate.id &&
+                  a.client_name === clientName &&
+                  a.source === 'LinkedIn'
+                );
+
+                if (existingAlert) continue;
+
                 const linkedinMatch = this.linkedin.checkProfileForClient(linkedinProfile, clientName, this.companyResearch);
 
                 if (linkedinMatch && linkedinMatch.match) {
-                  const existingAlert = (this.db.data.alerts || []).find(a =>
-                    a.candidate_id === candidate.id &&
-                    a.client_name === clientName &&
-                    a.source?.includes('LinkedIn')
-                  );
+                  console.log(`     🚨 LINKEDIN MATCH: ${linkedinMatch.reason}`);
 
-                  if (!existingAlert) {
-                    console.log(`    🚨 LINKEDIN MATCH: ${linkedinMatch.reason}`);
+                  this.createAlert({
+                    candidate_id: candidate.id,
+                    candidate_name: candidate.full_name,
+                    client_name: clientName,
+                    source: 'LinkedIn',
+                    confidence: linkedinMatch.confidence || 'Medium',
+                    match_details: linkedinMatch.reason,
+                    linkedin_url: linkedinProfile.profileUrl,
+                    linkedin_employer: linkedinMatch.employer,
+                    linkedin_title: linkedinMatch.title,
+                    linkedin_location: linkedinProfile.usLocation
+                  });
 
-                    const alert = {
-                      id: Date.now() + Math.random(),
-                      candidate_id: candidate.id,
-                      candidate_name: candidate.full_name,
-                      client_name: clientName,
-                      source: 'LinkedIn',
-                      confidence: linkedinMatch.confidence || 'Medium',
-                      match_details: linkedinMatch.reason,
-                      linkedin_url: linkedinProfile.profileUrl,
-                      status: 'pending',
-                      created_at: new Date().toISOString()
-                    };
-
-                    if (!this.db.data.alerts) this.db.data.alerts = [];
-                    this.db.data.alerts.push(alert);
-                    results.alertsCreated++;
-                    results.linkedinAlerts++;
-                    this.db.saveDatabase();
-                  }
+                  results.alertsCreated++;
+                  results.bySource.linkedin++;
                 }
-              } else {
-                console.log(`    ℹ️ No LinkedIn profile found`);
               }
-            } catch (error) {
-              console.log(`    ⚠️ LinkedIn error: ${error.message}`);
             }
+          } catch (error) {
+            console.log(`     ⚠️ LinkedIn error: ${error.message}`);
           }
 
-          // Google Search Check
-          if (this.googleSearch && this.googleSearch.apiKey) {
-            try {
-              console.log(`\n  🌐 GOOGLE SEARCH: "${candidate.full_name}"`);
-              const searchResults = await this.googleSearch.searchCandidate(candidate.full_name);
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      } else {
+        console.log(`  ⚠️ LinkedIn Service not configured (missing SERPER_API_KEY)`);
+      }
 
-              if (searchResults && searchResults.allResults && searchResults.allResults.length > 0) {
-                console.log(`    ✅ Found ${searchResults.allResults.length} search results`);
+      // =========================================
+      // PHASE 4: Doximity
+      // =========================================
+      console.log(`\n${'─'.repeat(70)}`);
+      console.log(`  PHASE 4: Doximity`);
+      console.log(`${'─'.repeat(70)}`);
 
-                // Check if Google results mention the client
+      if (this.doximity && this.doximity.configured) {
+        for (const candidate of candidates) {
+          const candidateSubmissions = submissions.filter(s => s.candidate_id === candidate.id);
+
+          if (candidateSubmissions.length === 0) continue;
+
+          console.log(`\n  🏥 ${candidate.full_name}`);
+
+          try {
+            const doximityProfile = await this.doximity.findProfile(candidate.full_name);
+
+            if (doximityProfile && doximityProfile.found) {
+              console.log(`     ✅ Found: ${doximityProfile.profileUrl}`);
+
+              for (const submission of candidateSubmissions) {
+                const clientName = submission.client_name || '';
+
+                const existingAlert = (this.db.data.alerts || []).find(a =>
+                  a.candidate_id === candidate.id &&
+                  a.client_name === clientName &&
+                  a.source === 'Doximity'
+                );
+
+                if (existingAlert) continue;
+
+                const doximityMatch = this.doximity.checkProfileForClient(doximityProfile, clientName, this.companyResearch);
+
+                if (doximityMatch && doximityMatch.match) {
+                  console.log(`     🚨 DOXIMITY MATCH: ${doximityMatch.reason}`);
+
+                  this.createAlert({
+                    candidate_id: candidate.id,
+                    candidate_name: candidate.full_name,
+                    client_name: clientName,
+                    source: 'Doximity',
+                    confidence: doximityMatch.confidence || 'Medium',
+                    match_details: doximityMatch.reason,
+                    doximity_url: doximityProfile.profileUrl,
+                    doximity_employer: doximityMatch.employer
+                  });
+
+                  results.alertsCreated++;
+                  results.bySource.doximity++;
+                }
+              }
+            }
+          } catch (error) {
+            console.log(`     ⚠️ Doximity error: ${error.message}`);
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 400));
+        }
+      } else {
+        console.log(`  ⚠️ Doximity Service not configured (missing SERPER_API_KEY)`);
+      }
+
+      // =========================================
+      // PHASE 5: Healthgrades
+      // =========================================
+      console.log(`\n${'─'.repeat(70)}`);
+      console.log(`  PHASE 5: Healthgrades`);
+      console.log(`${'─'.repeat(70)}`);
+
+      if (this.healthgrades && this.healthgrades.configured) {
+        for (const candidate of candidates) {
+          const candidateSubmissions = submissions.filter(s => s.candidate_id === candidate.id);
+
+          if (candidateSubmissions.length === 0) continue;
+
+          console.log(`\n  🩺 ${candidate.full_name}`);
+
+          try {
+            const healthgradesProfile = await this.healthgrades.findProfile(candidate.full_name);
+
+            if (healthgradesProfile && healthgradesProfile.found) {
+              console.log(`     ✅ Found: ${healthgradesProfile.profileUrl}`);
+
+              for (const submission of candidateSubmissions) {
+                const clientName = submission.client_name || '';
+
+                const existingAlert = (this.db.data.alerts || []).find(a =>
+                  a.candidate_id === candidate.id &&
+                  a.client_name === clientName &&
+                  a.source === 'Healthgrades'
+                );
+
+                if (existingAlert) continue;
+
+                const healthgradesMatch = this.healthgrades.checkProfileForClient(healthgradesProfile, clientName, this.companyResearch);
+
+                if (healthgradesMatch && healthgradesMatch.match) {
+                  console.log(`     🚨 HEALTHGRADES MATCH: ${healthgradesMatch.reason}`);
+
+                  this.createAlert({
+                    candidate_id: candidate.id,
+                    candidate_name: candidate.full_name,
+                    client_name: clientName,
+                    source: 'Healthgrades',
+                    confidence: healthgradesMatch.confidence || 'Medium',
+                    match_details: healthgradesMatch.reason,
+                    healthgrades_url: healthgradesProfile.profileUrl,
+                    healthgrades_practice: healthgradesMatch.practice
+                  });
+
+                  results.alertsCreated++;
+                  results.bySource.healthgrades++;
+                }
+              }
+            }
+          } catch (error) {
+            console.log(`     ⚠️ Healthgrades error: ${error.message}`);
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 400));
+        }
+      } else {
+        console.log(`  ⚠️ Healthgrades Service not configured (missing SERPER_API_KEY)`);
+      }
+
+      // =========================================
+      // PHASE 6: Google Search
+      // =========================================
+      console.log(`\n${'─'.repeat(70)}`);
+      console.log(`  PHASE 6: Google Search`);
+      console.log(`${'─'.repeat(70)}`);
+
+      if (this.googleSearch && this.googleSearch.apiKey) {
+        for (const candidate of candidates) {
+          const candidateSubmissions = submissions.filter(s => s.candidate_id === candidate.id);
+
+          if (candidateSubmissions.length === 0) continue;
+
+          console.log(`\n  🌐 ${candidate.full_name}`);
+
+          try {
+            const searchResults = await this.googleSearch.searchCandidate(candidate.full_name);
+
+            if (searchResults && searchResults.allResults && searchResults.allResults.length > 0) {
+              console.log(`     ✅ Found ${searchResults.allResults.length} search results`);
+
+              for (const submission of candidateSubmissions) {
+                const clientName = submission.client_name || '';
+
+                const existingAlert = (this.db.data.alerts || []).find(a =>
+                  a.candidate_id === candidate.id &&
+                  a.client_name === clientName &&
+                  a.source === 'Google'
+                );
+
+                if (existingAlert) continue;
+
                 const googleMatch = this.googleSearch.checkResultsForClient(searchResults, clientName, this.companyResearch);
 
                 if (googleMatch && googleMatch.match) {
-                  const existingAlert = (this.db.data.alerts || []).find(a =>
-                    a.candidate_id === candidate.id &&
-                    a.client_name === clientName &&
-                    a.source?.includes('Google')
-                  );
+                  console.log(`     🚨 GOOGLE MATCH: ${googleMatch.reason}`);
 
-                  if (!existingAlert) {
-                    console.log(`    🚨 GOOGLE MATCH: ${googleMatch.reason}`);
+                  this.createAlert({
+                    candidate_id: candidate.id,
+                    candidate_name: candidate.full_name,
+                    client_name: clientName,
+                    source: 'Google',
+                    confidence: 'Medium',
+                    match_details: googleMatch.reason,
+                    google_source_url: googleMatch.sourceUrl
+                  });
 
-                    const alert = {
-                      id: Date.now() + Math.random(),
-                      candidate_id: candidate.id,
-                      candidate_name: candidate.full_name,
-                      client_name: clientName,
-                      source: 'Google Search',
-                      confidence: 'Medium',
-                      match_details: googleMatch.reason,
-                      source_url: googleMatch.sourceUrl,
-                      status: 'pending',
-                      created_at: new Date().toISOString()
-                    };
-
-                    if (!this.db.data.alerts) this.db.data.alerts = [];
-                    this.db.data.alerts.push(alert);
-                    results.alertsCreated++;
-                    results.googleAlerts++;
-                    this.db.saveDatabase();
-                  }
+                  results.alertsCreated++;
+                  results.bySource.google++;
                 }
-              } else {
-                console.log(`    ℹ️ No Google Search results`);
               }
-            } catch (error) {
-              console.log(`    ⚠️ Google Search error: ${error.message}`);
             }
+          } catch (error) {
+            console.log(`     ⚠️ Google error: ${error.message}`);
           }
 
-          // Rate limit between candidates
           await new Promise(resolve => setTimeout(resolve, 500));
         }
+      } else {
+        console.log(`  ⚠️ Google Search Service not configured (missing SERPER_API_KEY)`);
       }
 
-      console.log(`\n========== Monitoring Complete ==========`);
-      console.log(`Candidates checked: ${results.checked}`);
-      console.log(`NPI numbers updated: ${results.npiUpdated}`);
-      console.log(`Pipeline alerts created: ${results.pipelineAlerts}`);
-      console.log(`NPI location/employer alerts created: ${results.npiAlerts}`);
-      console.log(`LinkedIn alerts created: ${results.linkedinAlerts || 0}`);
-      console.log(`Google Search alerts created: ${results.googleAlerts || 0}`);
-      console.log(`Total alerts created: ${results.alertsCreated}`);
-      console.log(`=========================================\n`);
+      // =========================================
+      // Summary
+      // =========================================
+      console.log(`\n${'='.repeat(70)}`);
+      console.log(`  MONITORING COMPLETE`);
+      console.log(`${'='.repeat(70)}`);
+      console.log(`  Candidates checked: ${results.checked}`);
+      console.log(`  Total alerts created: ${results.alertsCreated}`);
+      console.log(`  By Source:`);
+      console.log(`    - Pipeline: ${results.bySource.pipeline}`);
+      console.log(`    - NPI: ${results.bySource.npi}`);
+      console.log(`    - LinkedIn: ${results.bySource.linkedin}`);
+      console.log(`    - Doximity: ${results.bySource.doximity}`);
+      console.log(`    - Healthgrades: ${results.bySource.healthgrades}`);
+      console.log(`    - Google: ${results.bySource.google}`);
+      console.log(`${'='.repeat(70)}\n`);
 
     } catch (error) {
       console.error('Monitoring error:', error);
@@ -446,15 +497,59 @@ class MonitoringScheduler {
     return results;
   }
 
+  /**
+   * Create and save an alert
+   */
+  createAlert(alertData) {
+    const alert = {
+      id: Date.now() + Math.random(),
+      ...alertData,
+      status: 'pending',
+      created_at: new Date().toISOString()
+    };
+
+    if (!this.db.data.alerts) this.db.data.alerts = [];
+    this.db.data.alerts.push(alert);
+    this.db.saveDatabase();
+
+    return alert;
+  }
+
+  /**
+   * Get alerts grouped by source
+   */
+  getAlertsBySource() {
+    const alerts = this.db.data.alerts || [];
+    const grouped = {
+      all: alerts,
+      pipeline: alerts.filter(a => a.source === 'Pipeline'),
+      npi: alerts.filter(a => a.source === 'NPI'),
+      linkedin: alerts.filter(a => a.source === 'LinkedIn'),
+      doximity: alerts.filter(a => a.source === 'Doximity'),
+      healthgrades: alerts.filter(a => a.source === 'Healthgrades'),
+      google: alerts.filter(a => a.source === 'Google')
+    };
+    return grouped;
+  }
+
+  /**
+   * Add a company relationship
+   */
   addCompanyRelationship(parentCompany, subsidiaryOrAlias) {
     this.companyResearch.addRelationship(parentCompany, subsidiaryOrAlias);
     console.log(`Added relationship: ${parentCompany} → ${subsidiaryOrAlias}`);
   }
 
+  /**
+   * Get all company relationships
+   */
   getCompanyRelationships() {
     return this.companyResearch.getAllRelationships();
   }
 
+  /**
+   * Start scheduled monitoring
+   */
   startSchedule(intervalMinutes = 60) {
     console.log(`Starting monitoring schedule: every ${intervalMinutes} minutes`);
     this.scheduleInterval = setInterval(() => {
@@ -462,6 +557,9 @@ class MonitoringScheduler {
     }, intervalMinutes * 60 * 1000);
   }
 
+  /**
+   * Stop scheduled monitoring
+   */
   stopSchedule() {
     if (this.scheduleInterval) {
       clearInterval(this.scheduleInterval);

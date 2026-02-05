@@ -1,13 +1,15 @@
 /**
- * LinkedIn Service - Enhanced with Serper.dev
+ * LinkedIn Service - Enhanced with Serper.dev + US & Optometrist Filtering
  *
- * Uses Google Search (via Serper.dev - 2,500 free searches/month) to find LinkedIn profiles and extract:
+ * Uses Google Search (via Serper.dev) to find LinkedIn profiles and extract:
  * - Current employer / company
  * - Job title
- * - Whether they recently changed jobs
- * - Whether their profile mentions the client company
+ * - Location (MUST be in US)
+ * - Title match (MUST be optometrist, optician, or related)
  *
- * Also scrapes the LinkedIn profile page for deeper content analysis.
+ * FILTERING RULES:
+ * 1. Profile must be US-based (location shows US state)
+ * 2. Title must match optometrist, optician, OD, or related eye care roles
  */
 
 const https = require('https');
@@ -15,13 +17,30 @@ const http = require('http');
 
 class LinkedInService {
   constructor() {
-    // Support both old SERPAPI keys (for migration) and new SERPER key
     this.apiKey = process.env.SERPER_API_KEY || process.env.SERPAPI_KEY || process.env.SERPAPI_API_KEY || '';
     this.configured = !!this.apiKey;
     this.apiEndpoint = 'google.serper.dev';
 
+    // US State abbreviations for location filtering
+    this.usStates = new Set([
+      'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+      'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+      'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+      'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+      'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
+      'DC', 'PR'
+    ]);
+
+    // Valid job titles for optometry/eye care
+    this.validTitles = [
+      'optometrist', 'optician', 'od', 'o.d.', 'doctor of optometry',
+      'eye doctor', 'vision', 'ophthalmologist', 'eye care',
+      'optical', 'optometry', 'ocularist', 'orthoptist',
+      'contact lens', 'dispensing optician', 'ophthalmic'
+    ];
+
     if (this.configured) {
-      console.log(`✓ LinkedIn Service configured (via Serper.dev)`);
+      console.log(`✓ LinkedIn Service configured (via Serper.dev) - US + Optometrist filtering enabled`);
     } else {
       console.log(`⚠ LinkedIn Service: Missing SERPER_API_KEY - LinkedIn checks disabled`);
     }
@@ -30,11 +49,12 @@ class LinkedInService {
   /**
    * Make a POST request to Serper.dev API
    */
-  async makeRequest(query, numResults = 5) {
+  async makeRequest(query, numResults = 10) {
     return new Promise((resolve) => {
       const postData = JSON.stringify({
         q: query,
-        num: numResults
+        num: numResults,
+        gl: 'us' // Geo-locate to US for better US results
       });
 
       const options = {
@@ -71,7 +91,7 @@ class LinkedInService {
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(''), timeoutMs);
       const protocol = url.startsWith('https') ? https : http;
-      
+
       try {
         const req = protocol.get(url, {
           headers: {
@@ -87,7 +107,7 @@ class LinkedInService {
             return;
           }
           if (res.statusCode !== 200) { clearTimeout(timer); resolve(''); return; }
-          
+
           let data = '';
           res.on('data', chunk => {
             data += chunk;
@@ -126,8 +146,71 @@ class LinkedInService {
   }
 
   /**
+   * Check if location indicates US-based
+   * @returns {object} { isUS: boolean, location: string }
+   */
+  checkUSLocation(title, snippet) {
+    const combined = `${title} ${snippet}`.toLowerCase();
+
+    // Look for "City, ST" pattern where ST is a US state
+    const statePatterns = [
+      /([a-z\s]+),\s*([a-z]{2})\b/gi,
+      /\b([a-z]{2})\s*,\s*(?:usa|united states|us)\b/gi
+    ];
+
+    for (const pattern of statePatterns) {
+      const matches = combined.matchAll(pattern);
+      for (const m of matches) {
+        const possibleState = (m[2] || m[1]).toUpperCase();
+        if (this.usStates.has(possibleState)) {
+          return { isUS: true, location: m[0].trim() };
+        }
+      }
+    }
+
+    // Look for explicit US mentions
+    if (combined.includes('united states') || combined.includes('usa') || /\bus\b/.test(combined)) {
+      // Check it's not "us" as a pronoun by looking for state context
+      for (const state of this.usStates) {
+        if (combined.includes(`, ${state.toLowerCase()}`) || combined.includes(` ${state.toLowerCase()} `)) {
+          return { isUS: true, location: state };
+        }
+      }
+    }
+
+    // Look for US city names followed by state patterns
+    const usCities = ['new york', 'los angeles', 'chicago', 'houston', 'phoenix', 'philadelphia',
+      'san antonio', 'san diego', 'dallas', 'san jose', 'austin', 'jacksonville', 'fort worth',
+      'columbus', 'charlotte', 'seattle', 'denver', 'boston', 'atlanta', 'miami', 'portland'];
+
+    for (const city of usCities) {
+      if (combined.includes(city)) {
+        return { isUS: true, location: city };
+      }
+    }
+
+    return { isUS: false, location: null };
+  }
+
+  /**
+   * Check if title matches optometrist/optician/eye care roles
+   * @returns {object} { isValid: boolean, title: string }
+   */
+  checkValidTitle(title, snippet) {
+    const combined = `${title} ${snippet}`.toLowerCase();
+
+    for (const validTitle of this.validTitles) {
+      if (combined.includes(validTitle)) {
+        return { isValid: true, matchedTitle: validTitle };
+      }
+    }
+
+    return { isValid: false, matchedTitle: null };
+  }
+
+  /**
    * Search for a candidate's LinkedIn profile via Serper.dev
-   * Returns profile URL, current employer, title, and page content
+   * APPLIES FILTERING: US-only + Optometrist titles only
    */
   async findProfile(fullName) {
     if (!this.configured) {
@@ -139,72 +222,87 @@ class LinkedInService {
       return { found: false, reason: 'Could not parse name' };
     }
 
-    console.log(`    🔍 LinkedIn search for: "${cleanedName}"`);
+    console.log(`    🔍 LinkedIn search for: "${cleanedName}" (US + Optometrist filter)`);
 
-    // Search Google for their LinkedIn profile
+    // Search Google for their LinkedIn profile - include optometrist to help filtering
     const queries = [
       `"${cleanedName}" site:linkedin.com/in optometrist`,
-      `"${cleanedName}" site:linkedin.com/in OD`
+      `"${cleanedName}" site:linkedin.com/in OD optometry`
     ];
 
     let bestProfile = null;
+    let filterReason = null;
 
     for (const query of queries) {
-      const data = await this.makeRequest(query, 5);
+      const data = await this.makeRequest(query, 10);
 
-      // Serper.dev uses 'organic' instead of 'organic_results'
       if (data && data.organic) {
         for (const result of data.organic) {
           const link = result.link || '';
           // Must be a LinkedIn profile URL (not company page, not post)
-          if (link.includes('linkedin.com/in/')) {
-            // Check the title/snippet for name match
-            const normTitle = (result.title || '').toLowerCase();
-            const normSnippet = (result.snippet || '').toLowerCase();
-            const nameParts = cleanedName.toLowerCase().split(' ');
+          if (!link.includes('linkedin.com/in/')) continue;
 
-            // At least first AND last name should appear
-            const firstName = nameParts[0];
-            const lastName = nameParts[nameParts.length - 1];
-            const combined = `${normTitle} ${normSnippet}`;
+          const normTitle = (result.title || '');
+          const normSnippet = (result.snippet || '');
+          const nameParts = cleanedName.toLowerCase().split(' ');
 
-            if (combined.includes(firstName) && combined.includes(lastName)) {
-              bestProfile = {
-                url: link,
-                title: result.title || '',
-                snippet: result.snippet || '',
-                displayLink: link ? new URL(link).hostname : ''
-              };
-              break;
-            }
+          const firstName = nameParts[0];
+          const lastName = nameParts[nameParts.length - 1];
+          const combined = `${normTitle} ${normSnippet}`.toLowerCase();
+
+          // Name must match
+          if (!(combined.includes(firstName) && combined.includes(lastName))) continue;
+
+          // FILTER 1: Check US location
+          const locationCheck = this.checkUSLocation(normTitle, normSnippet);
+          if (!locationCheck.isUS) {
+            filterReason = `Filtered out: Location not confirmed as US`;
+            continue;
           }
+
+          // FILTER 2: Check title matches optometrist/optician
+          const titleCheck = this.checkValidTitle(normTitle, normSnippet);
+          if (!titleCheck.isValid) {
+            filterReason = `Filtered out: Title doesn't match optometrist/optician`;
+            continue;
+          }
+
+          // Passed all filters!
+          bestProfile = {
+            url: link,
+            title: result.title || '',
+            snippet: result.snippet || '',
+            usLocation: locationCheck.location,
+            matchedTitle: titleCheck.matchedTitle
+          };
+          break;
         }
       }
 
       if (bestProfile) break;
-      await new Promise(r => setTimeout(r, 500)); // Rate limit
+      await new Promise(r => setTimeout(r, 500));
     }
 
     if (!bestProfile) {
-      console.log(`    ℹ️ No LinkedIn profile found`);
-      return { found: false, reason: 'No LinkedIn profile found' };
+      console.log(`    ℹ️ No LinkedIn profile found${filterReason ? ` (${filterReason})` : ''}`);
+      return { found: false, reason: filterReason || 'No LinkedIn profile found' };
     }
 
     console.log(`    ✅ Found LinkedIn: ${bestProfile.url}`);
-    console.log(`       Title: ${bestProfile.title}`);
+    console.log(`       Location: ${bestProfile.usLocation} (US confirmed)`);
+    console.log(`       Title match: ${bestProfile.matchedTitle}`);
 
-    // Extract employer info from SerpAPI title/snippet
-    // LinkedIn titles look like: "John Smith - Optometrist at MyEyeDr | LinkedIn"
+    // Extract employer info from title/snippet
     const profileData = this.parseLinkedInTitle(bestProfile.title, bestProfile.snippet);
 
     // Also try to scrape the actual profile page for more data
     console.log(`    📄 Scraping LinkedIn profile page...`);
     const pageContent = await this.fetchPage(bestProfile.url);
-    
+
     if (pageContent && pageContent.length > 100) {
       console.log(`       ✅ Got ${pageContent.length} chars from profile`);
       profileData.pageContent = pageContent;
-      
+
       // Try to extract additional employer info from page content
       const pageEmployers = this.extractEmployersFromPage(pageContent);
       if (pageEmployers.length > 0) {
@@ -225,14 +323,14 @@ class LinkedInService {
       currentTitle: profileData.currentTitle,
       employers: profileData.allEmployers || profileData.employers,
       pageContent: profileData.pageContent || '',
+      usLocation: bestProfile.usLocation,
+      matchedTitle: bestProfile.matchedTitle,
       raw: bestProfile
     };
   }
 
   /**
    * Parse LinkedIn title format: "Name - Title at Company | LinkedIn"
-   * Also handles: "Name - Title - Company | LinkedIn"
-   * And snippet which often has: "Current: Optometrist at Company. Previous: ..."
    */
   parseLinkedInTitle(title, snippet) {
     const result = {
@@ -296,11 +394,10 @@ class LinkedInService {
 
   /**
    * Extract employer names from scraped LinkedIn page content
-   * Looks for patterns like "at Company", "Experience Company", etc.
    */
   extractEmployersFromPage(pageContent) {
     if (!pageContent) return [];
-    
+
     const employers = [];
     const text = pageContent;
 
@@ -313,7 +410,7 @@ class LinkedInService {
       }
     }
 
-    // Pattern: "Optometrist Company" or "OD Company" 
+    // Pattern: "Optometrist Company" or "OD Company"
     const titleMatches = text.matchAll(/(?:Optometrist|OD|O\.D\.|Doctor of Optometry|Eye Doctor)\s+(?:at\s+)?([A-Z][A-Za-z0-9\s&'.,-]{2,40})/gi);
     for (const m of titleMatches) {
       const emp = m[1].trim().replace(/\s+/g, ' ');
@@ -327,7 +424,6 @@ class LinkedInService {
 
   /**
    * Check if LinkedIn profile data mentions a specific client company
-   * Uses direct matching, fuzzy matching, and parent company relationships
    */
   checkProfileForClient(profileData, clientName, companyResearch) {
     if (!profileData || !profileData.found) return { match: false };
@@ -338,25 +434,15 @@ class LinkedInService {
     };
 
     const normClient = normalize(clientName);
-    
+
     // Build list of names to check (client + subsidiaries + parent companies)
     const namesToCheck = [normClient];
-    
-    if (companyResearch && typeof companyResearch.getAllRelationships === 'function') {
+
+    if (companyResearch && typeof companyResearch.getAliases === 'function') {
       try {
-        const allRels = companyResearch.getAllRelationships();
-        if (Array.isArray(allRels)) {
-          for (const rel of allRels) {
-            const normParent = normalize(rel.parent);
-            const isRelevant = normParent === normClient ||
-              (rel.subsidiaries || []).some(s => normalize(s) === normClient);
-            if (isRelevant) {
-              namesToCheck.push(normParent);
-              for (const sub of (rel.subsidiaries || [])) {
-                namesToCheck.push(normalize(sub));
-              }
-            }
-          }
+        const aliases = companyResearch.getAliases(clientName);
+        for (const alias of aliases) {
+          namesToCheck.push(normalize(alias));
         }
       } catch (e) { /* ignore */ }
     }
@@ -375,7 +461,8 @@ class LinkedInService {
             reason: `LinkedIn: Current employer "${profileData.currentEmployer}" matches "${clientName}"`,
             employer: profileData.currentEmployer,
             title: profileData.currentTitle,
-            profileUrl: profileData.profileUrl
+            profileUrl: profileData.profileUrl,
+            usLocation: profileData.usLocation
           };
         }
       }
@@ -395,7 +482,8 @@ class LinkedInService {
               reason: `LinkedIn: ${isCurrent ? 'Current' : 'Listed'} employer "${employer}" matches "${clientName}"`,
               employer: employer,
               title: profileData.currentTitle,
-              profileUrl: profileData.profileUrl
+              profileUrl: profileData.profileUrl,
+              usLocation: profileData.usLocation
             };
           }
         }
@@ -414,10 +502,11 @@ class LinkedInService {
             reason: `LinkedIn: Profile page content mentions "${clientName}"`,
             employer: profileData.currentEmployer,
             title: profileData.currentTitle,
-            profileUrl: profileData.profileUrl
+            profileUrl: profileData.profileUrl,
+            usLocation: profileData.usLocation
           };
         }
-        
+
         // Multi-word fuzzy: all significant words appear
         const words = name.split(' ').filter(w => w.length > 3);
         if (words.length >= 2 && words.every(w => normPage.includes(w))) {
@@ -428,7 +517,8 @@ class LinkedInService {
             reason: `LinkedIn: Profile page references "${clientName}" (word match)`,
             employer: profileData.currentEmployer,
             title: profileData.currentTitle,
-            profileUrl: profileData.profileUrl
+            profileUrl: profileData.profileUrl,
+            usLocation: profileData.usLocation
           };
         }
       }
@@ -445,7 +535,8 @@ class LinkedInService {
           reason: `LinkedIn: Search result for profile mentions "${clientName}"`,
           employer: profileData.currentEmployer,
           title: profileData.currentTitle,
-          profileUrl: profileData.profileUrl
+          profileUrl: profileData.profileUrl,
+          usLocation: profileData.usLocation
         };
       }
     }
