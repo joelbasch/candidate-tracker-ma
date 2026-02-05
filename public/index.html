@@ -9,6 +9,9 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    </style>
 </head>
 <body class="bg-gray-50">
     <div id="root"></div>
@@ -23,11 +26,18 @@
             const [selectedPipeline, setSelectedPipeline] = useState(null);
             const [showUpload, setShowUpload] = useState(false);
             const [uploadFile, setUploadFile] = useState(null);
-            const [alertFilter, setAlertFilter] = useState('all'); // all, pipeline, npi, pending, confirmed, dismissed
+            const [alertFilter, setAlertFilter] = useState('all');
+            const [alertSearch, setAlertSearch] = useState('');
+            const [toast, setToast] = useState(null);
+            const [checkRunning, setCheckRunning] = useState(false);
+
+            const showToast = (message, type = 'success') => {
+                setToast({ message, type });
+                setTimeout(() => setToast(null), 5000);
+            };
 
             useEffect(() => { loadData(); }, []);
 
-            // Handle browser back/forward buttons
             useEffect(() => {
                 const handlePopState = (event) => {
                     if (event.state) {
@@ -81,16 +91,32 @@
 
             const getFilteredAlerts = () => {
                 let filtered = alerts;
+                // Apply status/source filter
                 if (alertFilter === 'pipeline') {
-                    filtered = alerts.filter(a => a.source?.includes('Pipeline'));
+                    filtered = filtered.filter(a => a.source?.includes('Pipeline'));
                 } else if (alertFilter === 'npi') {
-                    filtered = alerts.filter(a => a.source?.includes('NPI'));
+                    filtered = filtered.filter(a => a.source_type === 'npi' || 
+                        (a.source && !a.source.includes('Pipeline') && a.source !== 'Google Search' && a.source !== 'LinkedIn'));
+                } else if (alertFilter === 'google_search') {
+                    filtered = filtered.filter(a => a.source === 'Google Search');
+                } else if (alertFilter === 'linkedin') {
+                    filtered = filtered.filter(a => a.source === 'LinkedIn');
                 } else if (alertFilter === 'pending') {
-                    filtered = alerts.filter(a => a.status === 'pending');
+                    filtered = filtered.filter(a => a.status === 'pending');
                 } else if (alertFilter === 'confirmed') {
-                    filtered = alerts.filter(a => a.status === 'confirmed');
+                    filtered = filtered.filter(a => a.status === 'confirmed');
                 } else if (alertFilter === 'dismissed') {
-                    filtered = alerts.filter(a => a.status === 'dismissed');
+                    filtered = filtered.filter(a => a.status === 'dismissed');
+                }
+                // Apply search
+                if (alertSearch.trim()) {
+                    const search = alertSearch.toLowerCase().trim();
+                    filtered = filtered.filter(a => 
+                        (a.candidate_name || '').toLowerCase().includes(search) ||
+                        (a.client_name || '').toLowerCase().includes(search) ||
+                        (a.business_found || '').toLowerCase().includes(search) ||
+                        (a.match_details || '').toLowerCase().includes(search)
+                    );
                 }
                 return filtered;
             };
@@ -134,42 +160,102 @@
                 }
             };
 
-            const getSourceBadge = (source) => {
-                if (source?.includes('Pipeline') && source?.includes('Hired')) {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800"><i className="fas fa-check-circle mr-1"></i>CRM: Hired</span>;
-                } else if (source?.includes('Pipeline') && source?.includes('Negotiation')) {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800"><i className="fas fa-handshake mr-1"></i>CRM: Negotiation</span>;
+            const getSourceBadge = (alert) => {
+                const source = alert.source;
+                if (source === 'CMS Medicare') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800 border border-purple-300"><i className="fas fa-hospital mr-1"></i>CMS Medicare</span>;
+                } else if (source === 'NPI + Google Places') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 border border-blue-300"><i className="fas fa-map-marker-alt mr-1"></i>NPI + Places</span>;
+                } else if (source === 'Google Search') {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-300"><i className="fas fa-search mr-1"></i>Google Search</span>;
+                } else if (source?.includes('Pipeline') && source?.includes('Hired')) {
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-300"><i className="fas fa-check-circle mr-1"></i>CRM: Hired</span>;
                 } else if (source?.includes('Pipeline')) {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800"><i className="fas fa-database mr-1"></i>CRM Pipeline</span>;
-                } else if (source?.includes('NPI')) {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800"><i className="fas fa-id-card mr-1"></i>NPI Registry</span>;
+                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 border border-blue-300"><i className="fas fa-database mr-1"></i>CRM Pipeline</span>;
                 }
-                return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">{source}</span>;
+                return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800 border border-gray-300">{source}</span>;
             };
 
             const getConfidenceBadge = (confidence) => {
-                if (confidence === 'Confirmed') {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-500 text-white">Confirmed</span>;
-                } else if (confidence === 'High') {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-orange-500 text-white">High</span>;
-                } else if (confidence === 'Medium') {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-yellow-500 text-white">Medium</span>;
-                }
+                if (confidence === 'Confirmed') return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-500 text-white">Confirmed</span>;
+                if (confidence === 'High') return <span className="px-2 py-1 rounded-full text-xs font-medium bg-orange-500 text-white">High</span>;
+                if (confidence === 'Medium') return <span className="px-2 py-1 rounded-full text-xs font-medium bg-yellow-500 text-white">Medium</span>;
                 return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-500 text-white">{confidence}</span>;
             };
 
             const getStatusBadge = (status) => {
-                if (status === 'confirmed') {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">✓ Confirmed</span>;
-                } else if (status === 'dismissed') {
-                    return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Dismissed</span>;
-                }
-                return <span className="px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Pending Review</span>;
+                if (status === 'confirmed') return <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">✓ Confirmed</span>;
+                if (status === 'dismissed') return <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Dismissed</span>;
+                return <span className="px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Pending</span>;
             };
 
-            // Calculate totals
-            const totalInPipeline = submissions.length;
+            // Render source links for an alert
+            const renderSourceLinks = (alert) => {
+                const links = alert.source_links || {};
+                const items = [];
+
+                if (links.npi_link) {
+                    items.push(
+                        <a key="npi" href={links.npi_link} target="_blank" rel="noopener" 
+                           className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200">
+                            <i className="fas fa-external-link-alt"></i> NPI Registry
+                        </a>
+                    );
+                }
+                if (links.cms_link) {
+                    items.push(
+                        <a key="cms" href={links.cms_link} target="_blank" rel="noopener" 
+                           className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200">
+                            <i className="fas fa-external-link-alt"></i> CMS Revalidation
+                        </a>
+                    );
+                }
+                if (links.google_maps_link) {
+                    items.push(
+                        <a key="maps" href={links.google_maps_link} target="_blank" rel="noopener" 
+                           className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200">
+                            <i className="fas fa-map-marker-alt"></i> Google Maps
+                        </a>
+                    );
+                }
+                if (links.search_url) {
+                    items.push(
+                        <a key="search" href={links.search_url} target="_blank" rel="noopener" 
+                           className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-green-50 text-green-700 hover:bg-green-100 border border-green-200">
+                            <i className="fas fa-external-link-alt"></i> {links.search_title ? links.search_title.substring(0, 40) + '...' : 'Source Website'}
+                        </a>
+                    );
+                }
+                if (links.google_search_query) {
+                    items.push(
+                        <a key="gsearch" href={`https://www.google.com/search?q=${encodeURIComponent(links.google_search_query)}`} target="_blank" rel="noopener" 
+                           className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200">
+                            <i className="fab fa-google"></i> Google Search
+                        </a>
+                    );
+                }
+                if (links.linkedin_url) {
+                    items.push(
+                        <a key="linkedin" href={links.linkedin_url} target="_blank" rel="noopener" 
+                           className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200">
+                            <i className="fab fa-linkedin"></i> LinkedIn {links.linkedin_employer ? `(${links.linkedin_employer.substring(0, 30)})` : 'Profile'}
+                        </a>
+                    );
+                }
+
+                if (items.length === 0) return null;
+                return <div className="flex gap-1 flex-wrap mt-2">{items}</div>;
+            };
+
+            // Calculate counts
+            const totalCandidates = candidates.length;
+            // Total in pipeline = unique candidates that have at least one submission
+            const candidatesWithSubmissions = [...new Set(submissions.map(s => s.candidate_id))].length;
             const pendingAlerts = alerts.filter(a => a.status === 'pending').length;
+            const npiAlerts = alerts.filter(a => a.source_type === 'npi' || 
+                (a.source && !a.source.includes('Pipeline') && a.source !== 'Google Search' && a.source !== 'LinkedIn')).length;
+            const googleSearchAlerts = alerts.filter(a => a.source === 'Google Search').length;
+            const linkedinAlerts = alerts.filter(a => a.source === 'LinkedIn').length;
 
             if (loading) return <div className="flex items-center justify-center h-screen"><div className="text-xl">Loading...</div></div>;
 
@@ -184,7 +270,7 @@
                             <div className="flex gap-2">
                                 <button onClick={() => setShowUpload(true)} className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"><i className="fas fa-upload mr-2"></i>Upload CSV</button>
                                 <button onClick={() => fetch('/api/sync/loxo', {method:'POST'}).then(() => loadData())} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"><i className="fas fa-sync mr-2"></i>Sync Loxo</button>
-                                <button onClick={() => fetch('/api/monitoring/run', {method:'POST'}).then(r => r.json()).then(d => { alert(`Checked: ${d.checked}, Alerts: ${d.alertsCreated}`); loadData(); })} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"><i className="fas fa-search mr-2"></i>Run Check</button>
+                                <button onClick={() => { setCheckRunning(true); fetch('/api/monitoring/run', {method:'POST'}).then(r => r.json()).then(d => { if (d.skipped) { showToast('⏳ Monitoring is already running. Please wait.', 'error'); } else { showToast(`✅ Monitoring complete: ${d.checked} checked, ${d.alertsCreated} alerts created`); } loadData(); }).catch(e => showToast('❌ Check failed: ' + e.message, 'error')).finally(() => setCheckRunning(false)); }} disabled={checkRunning} className={`px-4 py-2 ${checkRunning ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'} text-white rounded-lg`}><i className={`fas ${checkRunning ? 'fa-spinner fa-spin' : 'fa-search'} mr-2`}></i>{checkRunning ? 'Running...' : 'Run Check'}</button>
                             </div>
                         </div>
                     </header>
@@ -203,15 +289,14 @@
 
                         {activeTab === 'dashboard' && (
                             <div>
-                                {/* Summary Stats */}
                                 <div className="grid grid-cols-3 gap-4 mb-6">
                                     <div className="bg-white p-4 rounded-lg shadow border-l-4 border-blue-500">
                                         <p className="text-gray-500 text-sm">Total Candidates</p>
-                                        <p className="text-3xl font-bold text-blue-600">{candidates.length}</p>
+                                        <p className="text-3xl font-bold text-blue-600">{totalCandidates}</p>
                                     </div>
                                     <div className="bg-white p-4 rounded-lg shadow border-l-4 border-green-500">
                                         <p className="text-gray-500 text-sm">Total in Pipeline</p>
-                                        <p className="text-3xl font-bold text-green-600">{totalInPipeline}</p>
+                                        <p className="text-3xl font-bold text-green-600">{candidatesWithSubmissions}</p>
                                     </div>
                                     <div className="bg-white p-4 rounded-lg shadow border-l-4 border-yellow-500 cursor-pointer hover:shadow-lg" onClick={() => navigateTo('alerts')}>
                                         <p className="text-gray-500 text-sm">Pending Alerts</p>
@@ -286,7 +371,23 @@
                             <div>
                                 <div className="flex justify-between items-center mb-4">
                                     <h2 className="text-xl font-bold">Alerts ({getFilteredAlerts().length})</h2>
-                                    <div className="flex gap-2">
+                                    <div className="flex gap-2 items-center">
+                                        {/* Search bar */}
+                                        <div className="relative">
+                                            <i className="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 text-sm"></i>
+                                            <input 
+                                                type="text"
+                                                placeholder="Search by name..."
+                                                value={alertSearch}
+                                                onChange={(e) => setAlertSearch(e.target.value)}
+                                                className="pl-9 pr-3 py-2 border rounded-lg text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                                            />
+                                            {alertSearch && (
+                                                <button onClick={() => setAlertSearch('')} className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                                                    <i className="fas fa-times text-xs"></i>
+                                                </button>
+                                            )}
+                                        </div>
                                         <select 
                                             value={alertFilter} 
                                             onChange={(e) => setAlertFilter(e.target.value)}
@@ -297,13 +398,14 @@
                                             <option value="confirmed">Confirmed</option>
                                             <option value="dismissed">Dismissed</option>
                                             <option value="pipeline">Source: CRM Pipeline</option>
-                                            <option value="npi">Source: NPI Registry</option>
+                                            <option value="npi">Source: NPI</option>
+                                            <option value="google_search">Source: Google Search</option>
                                         </select>
                                     </div>
                                 </div>
 
-                                {/* Alert Stats */}
-                                <div className="grid grid-cols-5 gap-3 mb-6">
+                                {/* Alert Stats - now with 6 columns */}
+                                <div className="grid grid-cols-6 gap-3 mb-6">
                                     <div onClick={() => setAlertFilter('all')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'all' ? 'bg-blue-100 border-2 border-blue-400' : 'bg-white border'}`}>
                                         <p className="text-xs text-gray-500">Total</p>
                                         <p className="text-xl font-bold">{alerts.length}</p>
@@ -322,7 +424,15 @@
                                     </div>
                                     <div onClick={() => setAlertFilter('npi')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'npi' ? 'bg-purple-100 border-2 border-purple-400' : 'bg-white border'}`}>
                                         <p className="text-xs text-gray-500">From NPI</p>
-                                        <p className="text-xl font-bold text-purple-600">{alerts.filter(a => a.source?.includes('NPI')).length}</p>
+                                        <p className="text-xl font-bold text-purple-600">{npiAlerts}</p>
+                                    </div>
+                                    <div onClick={() => setAlertFilter('google_search')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'google_search' ? 'bg-green-100 border-2 border-green-400' : 'bg-white border'}`}>
+                                        <p className="text-xs text-gray-500">From Google Search</p>
+                                        <p className="text-xl font-bold text-green-600">{googleSearchAlerts}</p>
+                                    </div>
+                                    <div onClick={() => setAlertFilter('linkedin')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'linkedin' ? 'bg-sky-100 border-2 border-sky-400' : 'bg-white border'}`}>
+                                        <p className="text-xs text-gray-500">From LinkedIn</p>
+                                        <p className="text-xl font-bold text-sky-600">{linkedinAlerts}</p>
                                     </div>
                                 </div>
 
@@ -347,7 +457,7 @@
                                                         </div>
                                                         <p className="text-gray-600 mb-2">{a.match_details}</p>
                                                         <div className="flex gap-2 flex-wrap">
-                                                            {getSourceBadge(a.source)}
+                                                            {getSourceBadge(a)}
                                                             {getConfidenceBadge(a.confidence)}
                                                             <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-600">
                                                                 <i className="fas fa-building mr-1"></i>{a.client_name}
@@ -356,6 +466,15 @@
                                                                 <i className="fas fa-calendar mr-1"></i>{new Date(a.created_at).toLocaleDateString()}
                                                             </span>
                                                         </div>
+                                                        {/* Source Links */}
+                                                        {renderSourceLinks(a)}
+                                                        {/* Google Search snippet if available */}
+                                                        {a.source_links?.search_snippet && (
+                                                            <p className="mt-2 text-xs text-gray-500 italic bg-gray-50 p-2 rounded">
+                                                                <i className="fas fa-quote-left mr-1 text-gray-400"></i>
+                                                                {a.source_links.search_snippet.substring(0, 200)}...
+                                                            </p>
+                                                        )}
                                                     </div>
                                                     {a.status === 'pending' && (
                                                         <div className="flex gap-2 ml-4">
@@ -399,6 +518,15 @@
                                     <button onClick={() => setShowUpload(false)} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
                                     <button onClick={processCSV} className="px-4 py-2 bg-purple-600 text-white rounded">Upload</button>
                                 </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {toast && (
+                        <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg text-white transition-all ${toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'}`} style={{animation: 'slideIn 0.3s ease-out'}}>
+                            <div className="flex items-center gap-2">
+                                <span>{toast.message}</span>
+                                <button onClick={() => setToast(null)} className="ml-2 text-white hover:text-gray-200">✕</button>
                             </div>
                         </div>
                     )}
