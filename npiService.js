@@ -481,6 +481,180 @@ class NPIService {
   }
 
   /**
+   * Find ALL individual providers at a specific address
+   * This is MORE RELIABLE than organization search because it finds
+   * everyone practicing at that location regardless of how they registered
+   *
+   * @param {string} address - Street address (e.g., "395 Jay St")
+   * @param {string} city - City name
+   * @param {string} state - 2-letter state code
+   */
+  async findProvidersAtAddress(address, city, state) {
+    if (!address || !city || !state) return [];
+
+    await this.rateLimit();
+
+    console.log(`    🔍 Finding all providers at: ${address}, ${city}, ${state}`);
+
+    try {
+      // Search for individual providers (NPI-1) at this address
+      const response = await this.makeRequest({
+        enumeration_type: 'NPI-1', // Individual providers
+        city: city,
+        state: state,
+        limit: 200
+      });
+
+      if (response.result_count === 0) {
+        return [];
+      }
+
+      // Filter to only those at the specific street address
+      const addressLower = address.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const providers = [];
+
+      for (const result of response.results) {
+        // Check all addresses for this provider
+        for (const addr of (result.addresses || [])) {
+          const addrLine = (addr.address_1 || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+          // Check if address matches (fuzzy match)
+          if (addrLine.includes(addressLower) || addressLower.includes(addrLine)) {
+            const basic = result.basic || {};
+            providers.push({
+              npi: result.number,
+              firstName: basic.first_name,
+              lastName: basic.last_name,
+              fullName: `${basic.first_name || ''} ${basic.last_name || ''}`.trim(),
+              credential: basic.credential,
+              address: {
+                line1: addr.address_1,
+                city: addr.city,
+                state: addr.state,
+                zip: addr.postal_code
+              }
+            });
+            break; // Don't add same provider twice
+          }
+        }
+      }
+
+      console.log(`    Found ${providers.length} providers at this address`);
+      return providers;
+
+    } catch (e) {
+      console.log(`    Error finding providers at address: ${e.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Find ALL providers working for a client organization
+   * Uses multiple methods for best coverage:
+   * 1. Organization's practice addresses → find all providers at those addresses
+   * 2. Third-party sites that list "doctors at this practice"
+   *
+   * @param {string} clientName - Client company name
+   */
+  async findAllProvidersAtClient(clientName) {
+    console.log(`  👥 Finding all providers at: ${clientName}`);
+
+    const allProviders = [];
+    const seenNPIs = new Set();
+
+    // Step 1: Find the organization's NPI and address
+    const orgInfo = await this.searchOrganization(clientName);
+
+    if (orgInfo && orgInfo.address) {
+      // Search for all providers at the org's address
+      const providersAtAddress = await this.findProvidersAtAddress(
+        orgInfo.address.line1,
+        orgInfo.address.city,
+        orgInfo.address.state
+      );
+
+      for (const provider of providersAtAddress) {
+        if (!seenNPIs.has(provider.npi)) {
+          seenNPIs.add(provider.npi);
+          allProviders.push(provider);
+        }
+      }
+    }
+
+    // Step 2: Search third-party sites for "doctors at [client]"
+    if (this.serperApiKey) {
+      console.log(`    Searching third-party sites for providers...`);
+
+      const query = `"${clientName}" optometrist OR optometry doctor NPI`;
+      const data = await this.serperSearch(query, 10);
+
+      if (data && data.organic) {
+        for (const result of data.organic) {
+          const text = `${result.title || ''} ${result.snippet || ''}`;
+
+          // Extract NPI numbers from results
+          const npiMatches = text.match(/\b\d{10}\b/g) || [];
+          for (const npi of npiMatches) {
+            if (!seenNPIs.has(npi)) {
+              // Look up this NPI to get provider details
+              const provider = await this.searchByNPI(npi);
+              if (provider) {
+                seenNPIs.add(npi);
+                allProviders.push({
+                  npi: provider.npi,
+                  fullName: provider.fullName,
+                  credential: provider.credential,
+                  source: 'web_search'
+                });
+              }
+            }
+          }
+
+          // Extract doctor names and search for their NPIs
+          const namePatterns = [
+            /Dr\.\s+([A-Z][a-z]+\s+[A-Z][a-z]+)/g,
+            /([A-Z][a-z]+\s+[A-Z][a-z]+),?\s*(?:OD|O\.D\.|Optometrist)/g
+          ];
+
+          for (const pattern of namePatterns) {
+            const matches = text.matchAll(pattern);
+            for (const match of matches) {
+              const name = match[1];
+              if (name && name.length > 5) {
+                // Search NPI by name (limit to avoid too many API calls)
+                if (allProviders.length < 20) {
+                  const found = await this.searchByName(name);
+                  if (found.length > 0 && !seenNPIs.has(found[0].npi)) {
+                    seenNPIs.add(found[0].npi);
+                    allProviders.push({
+                      npi: found[0].npi,
+                      fullName: found[0].fullName,
+                      credential: found[0].credential,
+                      source: 'web_search'
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    console.log(`    Total providers found: ${allProviders.length}`);
+    if (allProviders.length > 0) {
+      allProviders.slice(0, 10).forEach(p =>
+        console.log(`      - ${p.fullName} (NPI: ${p.npi})`)
+      );
+      if (allProviders.length > 10) {
+        console.log(`      ... and ${allProviders.length - 10} more`);
+      }
+    }
+
+    return allProviders;
+  }
+
+  /**
    * Rate limiter to avoid overloading the API
    */
   async rateLimit() {
