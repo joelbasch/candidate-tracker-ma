@@ -813,7 +813,23 @@ class NPIService {
 
       // If no direct match, check parent companies
       if (!matchResult.isMatch && companyResearch) {
-        const companyRelation = companyResearch.areCompaniesRelated(employerName, clientName);
+        // First try static relationship check
+        let companyRelation = companyResearch.areCompaniesRelated(employerName, clientName);
+
+        // If no match, try dynamic web research for unknown companies
+        if (!companyRelation.match) {
+          try {
+            // Research both the employer and client to find relationships
+            await companyResearch.researchCompany(employerName);
+            await companyResearch.researchCompany(clientName);
+
+            // Check again after research
+            companyRelation = companyResearch.areCompaniesRelated(employerName, clientName);
+          } catch (e) {
+            console.log(`    Could not research company relationship: ${e.message}`);
+          }
+        }
+
         if (companyRelation && companyRelation.match) {
           matchResult = {
             isMatch: true,

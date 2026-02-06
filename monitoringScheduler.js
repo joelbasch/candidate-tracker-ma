@@ -116,6 +116,26 @@ class MonitoringScheduler {
       console.log(`Total submissions: ${submissions.length}`);
 
       // =========================================
+      // PHASE 0: Pre-Research Client Companies
+      // =========================================
+      console.log(`\n${'─'.repeat(70)}`);
+      console.log(`  PHASE 0: Pre-Researching Client Companies for Parent/Subsidiary Info`);
+      console.log(`${'─'.repeat(70)}`);
+
+      const clientNames = [...new Set(submissions.map(s => s.client_name).filter(Boolean))];
+      console.log(`  Found ${clientNames.length} unique clients to research`);
+
+      for (const clientName of clientNames) {
+        try {
+          await this.companyResearch.researchCompany(clientName);
+        } catch (e) {
+          console.log(`  Could not research ${clientName}: ${e.message}`);
+        }
+      }
+
+      console.log(`  ✓ Client company research complete`);
+
+      // =========================================
       // PHASE 1: Pipeline Stage Alerts (HIRED ONLY)
       // =========================================
       console.log(`\n${'─'.repeat(70)}`);

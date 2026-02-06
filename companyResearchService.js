@@ -6,19 +6,94 @@
 
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 class CompanyResearchService {
   constructor() {
     this.cacheFile = path.join(__dirname, 'company-relationships.json');
     this.cache = this.loadCache();
+    this.serperApiKey = process.env.SERPER_API_KEY;
     
     // Manual overrides - add known relationships here
+    // Comprehensive list of eye care parent companies and their subsidiaries
     this.manualRelationships = {
+      "EssilorLuxottica": [
+        "essilor",
+        "luxottica",
+        "lenscrafters",
+        "lens crafters",
+        "pearle vision",
+        "target optical",
+        "sears optical",
+        "sunglass hut",
+        "oliver peoples",
+        "persol",
+        "ray-ban",
+        "oakley",
+        "eyemed",
+        "grandvision",
+        "for eyes",
+        "vision express"
+      ],
+      "National Vision": [
+        "america's best",
+        "americas best",
+        "america's best contacts",
+        "eyeglass world",
+        "vista optical",
+        "vision center",
+        "fred meyer optical",
+        "walmart vision center"
+      ],
+      "MyEyeDr": [
+        "my eye dr",
+        "myeyedr",
+        "my eye doctor",
+        "clarkson eyecare",
+        "svs vision",
+        "vision source member"
+      ],
+      "EyeCare Partners": [
+        "eyecare partners",
+        "ecp",
+        "eye care partners",
+        "ecp vision"
+      ],
+      "US Vision": [
+        "usvision",
+        "us vision",
+        "jcpenney optical",
+        "jc penney optical",
+        "boscov's optical",
+        "boscovs optical",
+        "meijer optical"
+      ],
+      "VSP Vision": [
+        "vsp",
+        "vsp vision",
+        "vsp global",
+        "marchon",
+        "eyefinity",
+        "altair eyewear",
+        "visionworks"
+      ],
+      "Visionworks": [
+        "vision works",
+        "visionworks",
+        "davis vision"
+      ],
       "AEG Vision": [
         "AEG Vision*",
         "aeg vision",
-        "eyecare associates",
-        "vision source"
+        "aeg vision group",
+        "total vision",
+        "vision care associates"
+      ],
+      "EyeSouth Partners": [
+        "eyesouth",
+        "eye south",
+        "eye south partners",
+        "eyesouth partners"
       ],
       "TeamVision": [
         "team vision",
@@ -26,59 +101,11 @@ class CompanyResearchService {
         "olympia vision clinic",
         "olympic vision"
       ],
-      "EyeSouth Partners": [
-        "eyesouth",
-        "eye south",
-        "eye south partners"
-      ],
-      "MyEyeDr": [
-        "my eye dr",
-        "myeyedr",
-        "my eye doctor"
-      ],
-      "National Vision": [
-        "america's best",
-        "eyeglass world",
-        "vista optical",
-        "vision center"
-      ],
-      "Warby Parker": [
-        "warby",
-        "warby parker"
-      ],
-      "LensCrafters": [
-        "lenscrafters",
-        "lens crafters",
-        "luxottica"
-      ],
-      "Visionworks": [
-        "vision works",
-        "visionworks"
-      ],
-      "US Vision": [
-        "usvision",
-        "us vision",
-        "jcpenney optical",
-        "boscov's optical"
-      ],
-      "EssilorLuxottica": [
-        "essilor",
-        "luxottica",
-        "lenscrafters",
-        "pearle vision",
-        "target optical",
-        "sears optical",
-        "sunglass hut"
-      ],
-      "VSP Vision": [
-        "vsp",
-        "vsp vision",
-        "marchon",
-        "eyefinity"
-      ],
       "American Vision Partners": [
         "avp",
-        "american vision"
+        "american vision",
+        "american vision partners",
+        "avp eye"
       ],
       "Shopko Optical": [
         "shopko",
@@ -86,11 +113,76 @@ class CompanyResearchService {
       ],
       "Clarkson Eyecare": [
         "clarkson",
-        "clarkson eye"
+        "clarkson eye",
+        "clarkson eyecare"
       ],
-      "EyeCare Partners": [
-        "eyecare partners",
-        "ecp"
+      "Warby Parker": [
+        "warby",
+        "warby parker"
+      ],
+      "Costco Optical": [
+        "costco optical",
+        "costco vision",
+        "costco eye"
+      ],
+      "Sam's Club Optical": [
+        "sam's club optical",
+        "sams club optical",
+        "sam's club vision"
+      ],
+      "BJ's Optical": [
+        "bj's optical",
+        "bjs optical"
+      ],
+      "Cohen's Fashion Optical": [
+        "cohen's fashion optical",
+        "cohens fashion optical",
+        "cohens optical"
+      ],
+      "Eye Associates": [
+        "eye associates",
+        "eyecare associates",
+        "eye care associates"
+      ],
+      "Sterling Optical": [
+        "sterling optical",
+        "sterling vision"
+      ],
+      "Site for Sore Eyes": [
+        "site for sore eyes",
+        "siteforsoreeyes"
+      ],
+      "Eyemart Express": [
+        "eyemart express",
+        "eyemart",
+        "eye mart"
+      ],
+      "Stanton Optical": [
+        "stanton optical",
+        "my eyelab",
+        "now optics"
+      ],
+      "Texas State Optical": [
+        "tso",
+        "texas state optical"
+      ],
+      "ACUITY Eyecare Group": [
+        "acuity eyecare",
+        "acuity eye",
+        "acuity group"
+      ],
+      "Vision Source": [
+        "vision source",
+        "visionsource",
+        "vision source member"
+      ],
+      "PECAA": [
+        "pecaa",
+        "professional eye care associates of america"
+      ],
+      "IDOC": [
+        "idoc",
+        "independent doctors of optometric care"
       ]
     };
   }
@@ -245,36 +337,169 @@ class CompanyResearchService {
   }
 
   /**
-   * Research a company using web search (placeholder for future implementation)
-   * This would use a web search API to find parent companies and subsidiaries
+   * Make a Serper API request
+   */
+  async makeSerperRequest(query) {
+    if (!this.serperApiKey) {
+      return null;
+    }
+
+    return new Promise((resolve) => {
+      const postData = JSON.stringify({ q: query, num: 10 });
+
+      const options = {
+        hostname: 'google.serper.dev',
+        port: 443,
+        path: '/search',
+        method: 'POST',
+        headers: {
+          'X-API-KEY': this.serperApiKey,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            resolve(null);
+          }
+        });
+      });
+
+      req.on('error', () => resolve(null));
+      req.setTimeout(10000, () => {
+        req.destroy();
+        resolve(null);
+      });
+
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  /**
+   * Extract company names from search results
+   */
+  extractCompanyNames(searchResults, originalCompany) {
+    const companies = new Set();
+    const normalized = this.normalize(originalCompany);
+
+    if (!searchResults) return [];
+
+    // Common patterns to look for
+    const parentPatterns = [
+      /(?:owned by|subsidiary of|part of|acquired by|parent company[:\s]+)([A-Z][A-Za-z\s&']+(?:Inc|LLC|Corp|Company|Partners)?)/gi,
+      /([A-Z][A-Za-z\s&']+(?:Inc|LLC|Corp|Company|Partners)?)\s+(?:owns|acquired|subsidiary|parent)/gi
+    ];
+
+    // Check organic results
+    const results = [
+      ...(searchResults.organic || []),
+      ...(searchResults.answerBox ? [searchResults.answerBox] : [])
+    ];
+
+    for (const result of results) {
+      const text = `${result.title || ''} ${result.snippet || ''} ${result.answer || ''}`;
+
+      for (const pattern of parentPatterns) {
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+          const company = match[1].trim();
+          const normalizedCompany = this.normalize(company);
+
+          // Don't add the original company or very short names
+          if (normalizedCompany !== normalized && company.length >= 3 && company.length <= 50) {
+            companies.add(company);
+          }
+        }
+      }
+    }
+
+    return Array.from(companies);
+  }
+
+  /**
+   * Research a company using web search to find parent companies and subsidiaries
    */
   async researchCompany(companyName) {
     console.log(`  📊 Researching company: ${companyName}`);
-    
+
     // Check if we've researched recently (within 7 days)
     const normalized = this.normalize(companyName);
     const lastUpdated = this.cache.lastUpdated[normalized];
     const weekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    
+
     if (lastUpdated && lastUpdated > weekAgo) {
       console.log(`    Using cached research from ${new Date(lastUpdated).toLocaleDateString()}`);
       return this.cache.relationships[normalized] || [];
     }
 
-    // For now, return manual relationships
-    // In the future, this could use a web search API like:
-    // - Google Custom Search API
-    // - Bing Search API
-    // - SerpAPI
-    // To search for "{companyName} subsidiaries" or "{companyName} parent company"
-    
-    const aliases = this.getAliases(companyName);
-    
+    // Start with manual relationships
+    const aliases = new Set(this.getAliases(companyName));
+
+    // Try web search if Serper API is available
+    if (this.serperApiKey) {
+      try {
+        // Search for parent company
+        console.log(`    Searching for parent company of "${companyName}"...`);
+        const parentResults = await this.makeSerperRequest(`"${companyName}" parent company OR owned by`);
+        const parentCompanies = this.extractCompanyNames(parentResults, companyName);
+
+        if (parentCompanies.length > 0) {
+          console.log(`    Found potential parent companies: ${parentCompanies.join(', ')}`);
+          parentCompanies.forEach(p => aliases.add(this.normalize(p)));
+        }
+
+        // Search for subsidiaries
+        console.log(`    Searching for subsidiaries of "${companyName}"...`);
+        const subResults = await this.makeSerperRequest(`"${companyName}" subsidiaries OR owns OR acquired`);
+        const subsidiaries = this.extractCompanyNames(subResults, companyName);
+
+        if (subsidiaries.length > 0) {
+          console.log(`    Found potential subsidiaries: ${subsidiaries.join(', ')}`);
+          subsidiaries.forEach(s => aliases.add(this.normalize(s)));
+        }
+
+        // Save discovered relationships to cache
+        if (parentCompanies.length > 0 || subsidiaries.length > 0) {
+          if (!this.cache.relationships[normalized]) {
+            this.cache.relationships[normalized] = [];
+          }
+          [...parentCompanies, ...subsidiaries].forEach(c => {
+            const normalizedC = this.normalize(c);
+            if (!this.cache.relationships[normalized].includes(normalizedC)) {
+              this.cache.relationships[normalized].push(normalizedC);
+            }
+          });
+        }
+      } catch (e) {
+        console.log(`    Web search failed: ${e.message}`);
+      }
+    } else {
+      console.log(`    No Serper API key, using manual relationships only`);
+    }
+
     // Update cache timestamp
     this.cache.lastUpdated[normalized] = Date.now();
     this.saveCache();
-    
-    return aliases;
+
+    return Array.from(aliases);
+  }
+
+  /**
+   * Research multiple companies in parallel
+   */
+  async researchCompanies(companyNames) {
+    const results = {};
+    for (const name of companyNames) {
+      results[name] = await this.researchCompany(name);
+    }
+    return results;
   }
 
   /**
