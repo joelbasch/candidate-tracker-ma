@@ -169,7 +169,8 @@ class MonitoringScheduler {
 
         if (!candidate) continue;
 
-        // ONLY create Pipeline alert for CONFIRMED placements
+        // ONLY create Pipeline alert for CONFIRMED placements (Hired/Placed/Started)
+        // ALL other stages (Negotiation, Offer, Submitted, Interview, etc.) = NO alert, just search
         const isHired = stage.includes('hired') || stage.includes('placed') || stage.includes('started');
 
         if (isHired) {
@@ -196,13 +197,8 @@ class MonitoringScheduler {
             results.alertsCreated++;
             results.bySource.pipeline++;
           }
-        } else {
-          // For Negotiation, Offer, and earlier stages - just log that we'll search
-          const isNegotiation = stage.includes('negotiation') || stage.includes('offer');
-          if (isNegotiation) {
-            console.log(`  🔍 ${candidate.full_name} in ${submission.pipeline_stage} → Will search to verify`);
-          }
         }
+        // ALL other stages - no alert created, will be searched in subsequent phases
       }
 
       // =========================================
