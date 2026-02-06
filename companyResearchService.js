@@ -311,6 +311,124 @@ class CompanyResearchService {
   }
 
   /**
+   * IMPROVED: Check if two companies are related by searching for them together
+   * This catches cases like "Abba Eye Care" being owned by "AEG Vision"
+   * where the relationship isn't stated explicitly as "subsidiary of"
+   */
+  async checkCompanyRelationshipViaSearch(company1, company2) {
+    if (!this.serperApiKey) {
+      return { match: false, reason: 'No API key for web search' };
+    }
+
+    const norm1 = this.normalize(company1);
+    const norm2 = this.normalize(company2);
+
+    if (!norm1 || !norm2 || norm1.length < 3 || norm2.length < 3) {
+      return { match: false, reason: 'Invalid company names' };
+    }
+
+    console.log(`    🔍 Searching for relationship: "${company1}" ↔ "${company2}"`);
+
+    // METHOD 1: Direct co-occurrence search
+    // If both names appear on the same page, they're likely related
+    const coOccurrenceQuery = `"${company1}" "${company2}"`;
+    const coOccurrenceResults = await this.makeSerperRequest(coOccurrenceQuery);
+
+    if (coOccurrenceResults && coOccurrenceResults.organic && coOccurrenceResults.organic.length > 0) {
+      // Check if results actually mention both companies meaningfully
+      for (const result of coOccurrenceResults.organic) {
+        const text = `${result.title || ''} ${result.snippet || ''}`.toLowerCase();
+
+        // Skip results that are just search pages or directories
+        if (result.link && (
+          result.link.includes('google.com') ||
+          result.link.includes('bing.com') ||
+          result.link.includes('yellowpages') ||
+          result.link.includes('yelp.com/search')
+        )) continue;
+
+        // Look for relationship indicators
+        const relationshipIndicators = [
+          'part of', 'member of', 'owned by', 'acquired', 'subsidiary',
+          'joined', 'partnership', 'affiliate', 'location', 'practice',
+          'welcome', 'team', 'staff', 'doctor', 'optometrist'
+        ];
+
+        const hasRelationshipContext = relationshipIndicators.some(ind => text.includes(ind));
+
+        if (hasRelationshipContext) {
+          console.log(`    ✅ Found co-occurrence: ${result.link}`);
+
+          // Cache this relationship
+          this.addRelationship(company2, company1);
+
+          return {
+            match: true,
+            reason: `"${company1}" and "${company2}" appear together on: ${result.link}`,
+            sourceUrl: result.link
+          };
+        }
+      }
+    }
+
+    // METHOD 2: Check if company1 is on company2's website
+    // E.g., if "Abba Eye Care" appears on aegvision.com
+    const siteSearchQuery = `"${company1}" site:${this.extractDomain(company2)}`;
+    const siteResults = await this.makeSerperRequest(siteSearchQuery);
+
+    if (siteResults && siteResults.organic && siteResults.organic.length > 0) {
+      console.log(`    ✅ Found "${company1}" on ${company2}'s website`);
+
+      this.addRelationship(company2, company1);
+
+      return {
+        match: true,
+        reason: `"${company1}" found on ${company2}'s website`,
+        sourceUrl: siteResults.organic[0].link
+      };
+    }
+
+    // METHOD 3: Search acquisition/press release news
+    const acquisitionQuery = `"${company2}" acquisition OR acquired "${company1}"`;
+    const acquisitionResults = await this.makeSerperRequest(acquisitionQuery);
+
+    if (acquisitionResults && acquisitionResults.organic) {
+      for (const result of acquisitionResults.organic) {
+        const text = `${result.title || ''} ${result.snippet || ''}`.toLowerCase();
+
+        if (text.includes('acqui') || text.includes('purchase') || text.includes('join') || text.includes('welcome')) {
+          if (text.includes(norm1) || text.includes(company1.toLowerCase())) {
+            console.log(`    ✅ Found acquisition news: ${result.link}`);
+
+            this.addRelationship(company2, company1);
+
+            return {
+              match: true,
+              reason: `Acquisition found: "${company2}" acquired "${company1}"`,
+              sourceUrl: result.link
+            };
+          }
+        }
+      }
+    }
+
+    console.log(`    ℹ️ No relationship found between "${company1}" and "${company2}"`);
+    return { match: false, reason: 'No relationship found via web search' };
+  }
+
+  /**
+   * Extract likely domain from company name
+   */
+  extractDomain(companyName) {
+    // Convert "AEG Vision" -> "aegvision.com"
+    // Convert "MyEyeDr" -> "myeyedr.com"
+    const cleaned = companyName.toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .substring(0, 30);
+    return `${cleaned}.com`;
+  }
+
+  /**
    * Add a manual relationship
    */
   addRelationship(parentCompany, subsidiaryOrAlias) {

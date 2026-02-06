@@ -813,18 +813,24 @@ class NPIService {
 
       // If no direct match, check parent companies
       if (!matchResult.isMatch && companyResearch) {
-        // First try static relationship check
+        // First try static relationship check (fast, no API calls)
         let companyRelation = companyResearch.areCompaniesRelated(employerName, clientName);
 
         // If no match, try dynamic web research for unknown companies
         if (!companyRelation.match) {
           try {
-            // Research both the employer and client to find relationships
+            // Method 1: Research each company individually for known relationships
             await companyResearch.researchCompany(employerName);
             await companyResearch.researchCompany(clientName);
 
             // Check again after research
             companyRelation = companyResearch.areCompaniesRelated(employerName, clientName);
+
+            // Method 2: Direct co-occurrence search (most reliable for unknown relationships)
+            // E.g., finds "Abba Eye Care" and "AEG Vision" appearing together
+            if (!companyRelation.match && typeof companyResearch.checkCompanyRelationshipViaSearch === 'function') {
+              companyRelation = await companyResearch.checkCompanyRelationshipViaSearch(employerName, clientName);
+            }
           } catch (e) {
             console.log(`    Could not research company relationship: ${e.message}`);
           }
@@ -834,7 +840,8 @@ class NPIService {
           matchResult = {
             isMatch: true,
             confidence: 'high',
-            matchType: `parent company (${companyRelation.reason})`
+            matchType: `parent company (${companyRelation.reason})`,
+            sourceUrl: companyRelation.sourceUrl || null
           };
         }
       }
@@ -846,6 +853,9 @@ class NPIService {
         console.log(`       Organization: "${employerName}"`);
         console.log(`       Client: "${clientName}"`);
         console.log(`       Match Type: ${matchResult.matchType}`);
+        if (matchResult.sourceUrl) {
+          console.log(`       Evidence: ${matchResult.sourceUrl}`);
+        }
 
         return {
           source: 'NPI',
@@ -866,7 +876,8 @@ class NPIService {
           },
           links: {
             npiRegistry: provider.npiRegistryUrl,
-            cmsLookup: provider.cmsLookupUrl
+            cmsLookup: provider.cmsLookupUrl,
+            relationshipEvidence: matchResult.sourceUrl || null
           }
         };
       }
