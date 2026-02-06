@@ -127,12 +127,26 @@ class MonitoringScheduler {
 
       for (const clientName of clientNames) {
         try {
-          // Step 1: Research company for known relationships
+          // METHOD 1 (BEST): NPI Registry Authorized Official Lookup
+          // Find all organizations with the same authorized official as the client
+          // This is the most reliable way because it's official government data
+          if (typeof this.npi.findAllClientPractices === 'function') {
+            console.log(`\n  📋 Method 1: NPI Authorized Official Lookup for "${clientName}"`);
+            const npiPractices = await this.npi.findAllClientPractices(clientName);
+
+            // Add discovered practices to company relationships
+            for (const practice of npiPractices) {
+              this.companyResearch.addRelationship(clientName, practice.name);
+            }
+          }
+
+          // METHOD 2: Research company for known web relationships
+          console.log(`  📋 Method 2: Web Research for "${clientName}"`);
           await this.companyResearch.researchCompany(clientName);
 
-          // Step 2: Scrape client's website for ALL their practice locations
-          // This is the most reliable way to find subsidiaries
+          // METHOD 3: Scrape client's website for their location pages
           if (typeof this.companyResearch.scrapeClientLocations === 'function') {
+            console.log(`  📋 Method 3: Location Page Scraping for "${clientName}"`);
             await this.companyResearch.scrapeClientLocations(clientName);
           }
         } catch (e) {
@@ -140,7 +154,7 @@ class MonitoringScheduler {
         }
       }
 
-      console.log(`  ✓ Client company research complete`);
+      console.log(`\n  ✓ Client company research complete`);
 
       // =========================================
       // PHASE 1: Pipeline Stage Alerts (HIRED ONLY)

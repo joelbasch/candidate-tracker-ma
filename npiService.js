@@ -326,6 +326,161 @@ class NPIService {
   }
 
   /**
+   * Search NPI Registry for an ORGANIZATION by name
+   * Returns org NPI with authorized official info
+   * @param {string} orgName - Organization name (e.g., "AEG Vision")
+   */
+  async searchOrganization(orgName) {
+    if (!orgName || orgName.length < 3) return null;
+
+    await this.rateLimit();
+
+    console.log(`    🏢 Searching NPI for organization: "${orgName}"`);
+
+    try {
+      // Search for organization type (NPI-2)
+      const response = await this.makeRequest({
+        organization_name: orgName,
+        enumeration_type: 'NPI-2', // Organizations only
+        limit: 10
+      });
+
+      if (response.result_count === 0) {
+        console.log(`    No organization NPI found for "${orgName}"`);
+        return null;
+      }
+
+      // Return first matching organization with authorized official info
+      const org = response.results[0];
+      const basic = org.basic || {};
+      const authorizedOfficial = basic.authorized_official_first_name && basic.authorized_official_last_name
+        ? `${basic.authorized_official_first_name} ${basic.authorized_official_last_name}`
+        : null;
+
+      return {
+        npi: org.number,
+        name: basic.organization_name,
+        authorizedOfficial: authorizedOfficial,
+        authorizedOfficialTitle: basic.authorized_official_title_or_position,
+        authorizedOfficialPhone: basic.authorized_official_telephone_number,
+        address: org.addresses && org.addresses[0] ? {
+          line1: org.addresses[0].address_1,
+          city: org.addresses[0].city,
+          state: org.addresses[0].state,
+          zip: org.addresses[0].postal_code
+        } : null
+      };
+    } catch (e) {
+      console.log(`    Error searching org NPI: ${e.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Find ALL organizations with the same Authorized Official
+   * This is the MOST RELIABLE way to find related practices!
+   * If "John Smith" is the authorized official for AEG Vision and also for
+   * "Abba Eye Care", they're owned by the same parent.
+   *
+   * @param {string} officialName - Authorized official's name
+   */
+  async findOrganizationsByAuthorizedOfficial(officialName) {
+    if (!officialName) return [];
+
+    const nameParts = officialName.trim().split(/\s+/);
+    if (nameParts.length < 2) return [];
+
+    const firstName = nameParts[0];
+    const lastName = nameParts[nameParts.length - 1];
+
+    await this.rateLimit();
+
+    console.log(`    🔍 Finding all orgs with authorized official: ${officialName}`);
+
+    try {
+      const response = await this.makeRequest({
+        enumeration_type: 'NPI-2',
+        authorized_official_first_name: firstName,
+        authorized_official_last_name: lastName,
+        limit: 200 // Get all
+      });
+
+      if (response.result_count === 0) {
+        return [];
+      }
+
+      const organizations = [];
+      for (const org of response.results) {
+        const basic = org.basic || {};
+        organizations.push({
+          npi: org.number,
+          name: basic.organization_name,
+          address: org.addresses && org.addresses[0] ? {
+            city: org.addresses[0].city,
+            state: org.addresses[0].state
+          } : null
+        });
+      }
+
+      console.log(`    Found ${organizations.length} organizations with same authorized official`);
+      return organizations;
+
+    } catch (e) {
+      console.log(`    Error finding orgs by official: ${e.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * BEST METHOD: Get all practices owned by a client using NPI authorized official lookup
+   *
+   * Example: Search "AEG Vision" → Get authorized official "John Smith"
+   *          → Find ALL orgs with "John Smith" as authorized official
+   *          → These are all AEG Vision practices!
+   *
+   * @param {string} clientName - Client company name
+   */
+  async findAllClientPractices(clientName) {
+    console.log(`  🏢 Finding all practices for client: ${clientName}`);
+
+    // Step 1: Find the organization's NPI
+    const orgInfo = await this.searchOrganization(clientName);
+
+    if (!orgInfo) {
+      console.log(`    Could not find organization NPI for "${clientName}"`);
+      return [];
+    }
+
+    console.log(`    Found org NPI: ${orgInfo.npi}`);
+    console.log(`    Authorized Official: ${orgInfo.authorizedOfficial || 'Not listed'}`);
+
+    if (!orgInfo.authorizedOfficial) {
+      console.log(`    No authorized official listed - cannot find related orgs`);
+      return [];
+    }
+
+    // Step 2: Find ALL organizations with the same authorized official
+    const relatedOrgs = await this.findOrganizationsByAuthorizedOfficial(orgInfo.authorizedOfficial);
+
+    // Filter out the parent org itself and return practice names
+    const practices = relatedOrgs
+      .filter(o => o.npi !== orgInfo.npi)
+      .map(o => ({
+        name: o.name,
+        npi: o.npi,
+        location: o.address ? `${o.address.city}, ${o.address.state}` : null
+      }));
+
+    if (practices.length > 0) {
+      console.log(`    Found ${practices.length} related practices:`);
+      practices.slice(0, 5).forEach(p => console.log(`      - ${p.name}`));
+      if (practices.length > 5) console.log(`      ... and ${practices.length - 5} more`);
+    }
+
+    return practices;
+  }
+
+  /**
    * Rate limiter to avoid overloading the API
    */
   async rateLimit() {
