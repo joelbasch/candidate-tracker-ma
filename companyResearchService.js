@@ -99,7 +99,14 @@ class CompanyResearchService {
         "team vision",
         "teamvision",
         "olympia vision clinic",
-        "olympic vision"
+        "olympic vision",
+        "team vision eye care"
+      ],
+      "Triangle Vision": [
+        "triangle vision",
+        "trianglevision",
+        "triangle eye",
+        "triangle eye care"
       ],
       "American Vision Partners": [
         "avp",
@@ -308,6 +315,135 @@ class CompanyResearchService {
     }
 
     return { match: false, reason: null };
+  }
+
+  /**
+   * BEST METHOD: Scrape a parent company's locations page to get ALL their practices
+   * This is the most reliable way to find subsidiaries/practices
+   *
+   * E.g., Search "AEG Vision locations" → finds aegvision.com/locations
+   * Then extract all practice names from that page
+   */
+  async scrapeClientLocations(clientName) {
+    if (!this.serperApiKey) {
+      return [];
+    }
+
+    console.log(`  🏢 Scraping locations for: ${clientName}`);
+
+    const normalized = this.normalize(clientName);
+
+    // Check cache first (locations cached for 30 days)
+    const cacheKey = `locations_${normalized}`;
+    const cachedLocations = this.cache.relationships[cacheKey];
+    const lastUpdated = this.cache.lastUpdated[cacheKey];
+    const monthAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+
+    if (cachedLocations && lastUpdated && lastUpdated > monthAgo) {
+      console.log(`    Using cached locations (${cachedLocations.length} practices)`);
+      return cachedLocations;
+    }
+
+    const practices = new Set();
+
+    // Search for locations page
+    const locationsQuery = `"${clientName}" locations OR practices OR "our offices" site:${this.extractDomain(clientName)}`;
+    const locResults = await this.makeSerperRequest(locationsQuery);
+
+    if (locResults && locResults.organic) {
+      for (const result of locResults.organic) {
+        const text = `${result.title || ''} ${result.snippet || ''}`;
+
+        // Extract practice/location names from the results
+        // Look for patterns like "Location Name - City, State" or "Practice Name"
+        const practicePatterns = [
+          /([A-Z][A-Za-z0-9\s&'.,-]*(?:Eye|Vision|Optical|Optometry|Clinic|Center|Associates)[A-Za-z0-9\s&'.,-]*)/g,
+          /(?:^|\||\-)\s*([A-Z][A-Za-z\s]{3,40})\s*(?:,\s*[A-Z]{2}|\||\-|$)/g
+        ];
+
+        for (const pattern of practicePatterns) {
+          const matches = text.matchAll(pattern);
+          for (const m of matches) {
+            const practice = m[1].trim();
+            // Filter out generic terms and the client name itself
+            if (practice.length > 5 && practice.length < 50 &&
+                !practice.toLowerCase().includes(normalized) &&
+                !practice.toLowerCase().includes('location') &&
+                !practice.toLowerCase().includes('contact')) {
+              practices.add(practice.toLowerCase());
+            }
+          }
+        }
+      }
+    }
+
+    // Also search for "all locations" or "find a doctor"
+    const allLocsQuery = `site:${this.extractDomain(clientName)} "all locations" OR "find a doctor" OR "our practices"`;
+    const allLocsResults = await this.makeSerperRequest(allLocsQuery);
+
+    if (allLocsResults && allLocsResults.organic) {
+      for (const result of allLocsResults.organic) {
+        const text = `${result.title || ''} ${result.snippet || ''}`;
+
+        // Extract practice names
+        const practicePattern = /([A-Z][A-Za-z0-9\s&'.,-]*(?:Eye|Vision|Optical|Clinic|Center|Associates)[A-Za-z0-9\s&'.,-]*)/g;
+        const matches = text.matchAll(practicePattern);
+        for (const m of matches) {
+          const practice = m[1].trim();
+          if (practice.length > 5 && practice.length < 50 &&
+              !practice.toLowerCase().includes(normalized)) {
+            practices.add(practice.toLowerCase());
+          }
+        }
+      }
+    }
+
+    // Search for press releases about acquisitions
+    const prQuery = `"${clientName}" acquired OR acquisition OR "welcomes" OR "joins"`;
+    const prResults = await this.makeSerperRequest(prQuery);
+
+    if (prResults && prResults.organic) {
+      for (const result of prResults.organic) {
+        const text = `${result.title || ''} ${result.snippet || ''}`;
+
+        // Look for "acquires [Practice Name]" or "[Practice Name] joins"
+        const acqPatterns = [
+          /acquires?\s+([A-Z][A-Za-z0-9\s&'.,-]{3,40})/gi,
+          /([A-Z][A-Za-z0-9\s&'.,-]{3,40})\s+joins\s/gi,
+          /welcomes?\s+([A-Z][A-Za-z0-9\s&'.,-]{3,40})/gi
+        ];
+
+        for (const pattern of acqPatterns) {
+          const matches = text.matchAll(pattern);
+          for (const m of matches) {
+            const practice = m[1].trim();
+            if (practice.length > 3 && practice.length < 50) {
+              practices.add(practice.toLowerCase());
+            }
+          }
+        }
+      }
+    }
+
+    const practiceList = Array.from(practices);
+
+    if (practiceList.length > 0) {
+      console.log(`    Found ${practiceList.length} practices: ${practiceList.slice(0, 5).join(', ')}${practiceList.length > 5 ? '...' : ''}`);
+
+      // Cache the results
+      this.cache.relationships[cacheKey] = practiceList;
+      this.cache.lastUpdated[cacheKey] = Date.now();
+      this.saveCache();
+
+      // Also add to manual relationships for this session
+      for (const practice of practiceList) {
+        this.addRelationship(clientName, practice);
+      }
+    } else {
+      console.log(`    No practices found via scraping`);
+    }
+
+    return practiceList;
   }
 
   /**

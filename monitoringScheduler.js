@@ -127,7 +127,14 @@ class MonitoringScheduler {
 
       for (const clientName of clientNames) {
         try {
+          // Step 1: Research company for known relationships
           await this.companyResearch.researchCompany(clientName);
+
+          // Step 2: Scrape client's website for ALL their practice locations
+          // This is the most reliable way to find subsidiaries
+          if (typeof this.companyResearch.scrapeClientLocations === 'function') {
+            await this.companyResearch.scrapeClientLocations(clientName);
+          }
         } catch (e) {
           console.log(`  Could not research ${clientName}: ${e.message}`);
         }
