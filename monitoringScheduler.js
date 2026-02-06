@@ -597,6 +597,33 @@ class MonitoringScheduler {
         this.createAlert(alertData);
         results.alertsCreated++;
 
+        // Update candidate profile with source links
+        const candidate = candidates.find(c => c.id === tracked.candidate_id);
+        if (candidate) {
+          // Store all found links in candidate profile
+          if (!candidate.source_links) candidate.source_links = {};
+
+          for (const match of tracked.matches) {
+            if (match.npi_registry_url) candidate.source_links.npi_registry = match.npi_registry_url;
+            if (match.cms_lookup_url) candidate.source_links.cms_lookup = match.cms_lookup_url;
+            if (match.linkedin_url) candidate.source_links.linkedin = match.linkedin_url;
+            if (match.doximity_url) candidate.source_links.doximity = match.doximity_url;
+            if (match.healthgrades_url) candidate.source_links.healthgrades = match.healthgrades_url;
+            if (match.google_source_url) candidate.source_links.google = match.google_source_url;
+          }
+
+          // Also store match info
+          if (!candidate.match_history) candidate.match_history = [];
+          candidate.match_history.push({
+            client_name: tracked.client_name,
+            sources: tracked.sources,
+            confidence: tracked.confidence,
+            found_at: new Date().toISOString()
+          });
+
+          this.db.saveDatabase();
+        }
+
         console.log(`  🚨 NEW ALERT: ${tracked.candidate_name} → ${tracked.client_name}`);
         console.log(`     Sources: ${tracked.sources.join(', ')}`);
         console.log(`     Confidence: ${tracked.confidence}`);

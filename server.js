@@ -537,6 +537,34 @@ app.post('/api/upload/csv', upload.single('file'), (req, res) => {
   }
 });
 
+// Get single candidate with all details (including source links)
+app.get('/api/candidates/:id', (req, res) => {
+  try {
+    const candidateId = parseInt(req.params.id);
+    const candidate = (db.data.candidates || []).find(c => c.id === candidateId);
+
+    if (!candidate) {
+      return res.status(404).json({ error: 'Candidate not found' });
+    }
+
+    // Get submissions for this candidate
+    const submissions = (db.data.submissions || []).filter(s => s.candidate_id === candidateId);
+
+    // Get alerts for this candidate
+    const alerts = (db.data.alerts || []).filter(a => a.candidate_id === candidateId);
+
+    res.json({
+      ...candidate,
+      submissions,
+      alerts,
+      source_links: candidate.source_links || {},
+      match_history: candidate.match_history || []
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Delete candidate
 app.delete('/api/candidates/:id', (req, res) => {
   try {
