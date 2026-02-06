@@ -210,7 +210,8 @@ class LinkedInService {
 
   /**
    * Search for a candidate's LinkedIn profile via Serper.dev
-   * APPLIES FILTERING: US-only + Optometrist titles only
+   * NEW APPROACH: Search by name only, then filter results by US + Optometrist
+   * This finds MORE profiles than adding "optometrist" to search query
    */
   async findProfile(fullName) {
     if (!this.configured) {
@@ -222,81 +223,109 @@ class LinkedInService {
       return { found: false, reason: 'Could not parse name' };
     }
 
-    console.log(`    🔍 LinkedIn search for: "${cleanedName}" (US + Optometrist filter)`);
+    console.log(`    🔍 LinkedIn search for: "${cleanedName}"`);
 
-    // Search Google for their LinkedIn profile - include optometrist to help filtering
-    const queries = [
-      `"${cleanedName}" site:linkedin.com/in optometrist`,
-      `"${cleanedName}" site:linkedin.com/in OD optometry`
-    ];
+    // STEP 1: Search for name only on LinkedIn (no optometrist filter in query)
+    // This finds ALL profiles for this name
+    const query = `"${cleanedName}" site:linkedin.com/in`;
+    const data = await this.makeRequest(query, 15); // Get more results to filter
 
+    if (!data || !data.organic || data.organic.length === 0) {
+      console.log(`    ℹ️ No LinkedIn results found for "${cleanedName}"`);
+      return { found: false, reason: 'No LinkedIn search results' };
+    }
+
+    console.log(`    📋 Found ${data.organic.length} LinkedIn results, filtering...`);
+
+    // STEP 2: Go through ALL results and filter
     let bestProfile = null;
-    let filterReason = null;
+    let allCandidates = [];
+    let filterStats = { total: 0, nameMatch: 0, usMatch: 0, titleMatch: 0 };
 
-    for (const query of queries) {
-      const data = await this.makeRequest(query, 10);
+    for (const result of data.organic) {
+      filterStats.total++;
+      const link = result.link || '';
 
-      if (data && data.organic) {
-        for (const result of data.organic) {
-          const link = result.link || '';
-          // Must be a LinkedIn profile URL (not company page, not post)
-          if (!link.includes('linkedin.com/in/')) continue;
+      // Must be a LinkedIn profile URL (not company page, not post)
+      if (!link.includes('linkedin.com/in/')) continue;
 
-          const normTitle = (result.title || '');
-          const normSnippet = (result.snippet || '');
-          const nameParts = cleanedName.toLowerCase().split(' ');
+      const normTitle = result.title || '';
+      const normSnippet = result.snippet || '';
+      const nameParts = cleanedName.toLowerCase().split(' ');
 
-          const firstName = nameParts[0];
-          const lastName = nameParts[nameParts.length - 1];
-          const combined = `${normTitle} ${normSnippet}`.toLowerCase();
+      const firstName = nameParts[0];
+      const lastName = nameParts[nameParts.length - 1];
+      const combined = `${normTitle} ${normSnippet}`.toLowerCase();
 
-          // Name must match
-          if (!(combined.includes(firstName) && combined.includes(lastName))) continue;
+      // Check name match
+      if (!(combined.includes(firstName) && combined.includes(lastName))) continue;
+      filterStats.nameMatch++;
 
-          // FILTER 1: Check US location
-          const locationCheck = this.checkUSLocation(normTitle, normSnippet);
-          if (!locationCheck.isUS) {
-            filterReason = `Filtered out: Location not confirmed as US`;
-            continue;
-          }
+      // Check US location
+      const locationCheck = this.checkUSLocation(normTitle, normSnippet);
+      const isUS = locationCheck.isUS;
+      if (isUS) filterStats.usMatch++;
 
-          // FILTER 2: Check title matches optometrist/optician
-          const titleCheck = this.checkValidTitle(normTitle, normSnippet);
-          if (!titleCheck.isValid) {
-            filterReason = `Filtered out: Title doesn't match optometrist/optician`;
-            continue;
-          }
+      // Check title matches optometrist/optician
+      const titleCheck = this.checkValidTitle(normTitle, normSnippet);
+      const isValidTitle = titleCheck.isValid;
+      if (isValidTitle) filterStats.titleMatch++;
 
-          // Passed all filters!
-          bestProfile = {
-            url: link,
-            title: result.title || '',
-            snippet: result.snippet || '',
-            usLocation: locationCheck.location,
-            matchedTitle: titleCheck.matchedTitle
-          };
-          break;
+      // Store all candidates with their scores
+      allCandidates.push({
+        url: link,
+        title: normTitle,
+        snippet: normSnippet,
+        isUS: isUS,
+        usLocation: locationCheck.location,
+        isValidTitle: isValidTitle,
+        matchedTitle: titleCheck.matchedTitle,
+        score: (isUS ? 2 : 0) + (isValidTitle ? 2 : 0)
+      });
+    }
+
+    console.log(`    📊 Filter stats: ${filterStats.nameMatch} name match, ${filterStats.usMatch} US, ${filterStats.titleMatch} optometrist`);
+
+    // STEP 3: Select best profile - prefer US + optometrist, but accept partial matches
+    allCandidates.sort((a, b) => b.score - a.score);
+
+    if (allCandidates.length > 0) {
+      // Take the best match
+      const best = allCandidates[0];
+
+      // If best match is US + optometrist (score 4), use it
+      // If score is 2 (only US or only optometrist), use it but note it
+      // If score is 0, still use it but with low confidence
+
+      if (best.score >= 2 || allCandidates.length === 1) {
+        bestProfile = best;
+
+        if (best.score === 4) {
+          console.log(`    ✅ Best match: US + Optometrist confirmed`);
+        } else if (best.isUS && !best.isValidTitle) {
+          console.log(`    ⚠️ Best match: US location, title not confirmed as optometrist`);
+        } else if (!best.isUS && best.isValidTitle) {
+          console.log(`    ⚠️ Best match: Optometrist title, location not confirmed as US`);
+        } else {
+          console.log(`    ⚠️ Best match: Neither US nor optometrist title confirmed`);
         }
       }
-
-      if (bestProfile) break;
-      await new Promise(r => setTimeout(r, 500));
     }
 
     if (!bestProfile) {
-      console.log(`    ℹ️ No LinkedIn profile found${filterReason ? ` (${filterReason})` : ''}`);
-      return { found: false, reason: filterReason || 'No LinkedIn profile found' };
+      console.log(`    ℹ️ No suitable LinkedIn profile found after filtering`);
+      return { found: false, reason: 'No matching profile after US/title filtering' };
     }
 
     console.log(`    ✅ Found LinkedIn: ${bestProfile.url}`);
-    console.log(`       Location: ${bestProfile.usLocation} (US confirmed)`);
-    console.log(`       Title match: ${bestProfile.matchedTitle}`);
+    if (bestProfile.usLocation) console.log(`       Location: ${bestProfile.usLocation}`);
+    if (bestProfile.matchedTitle) console.log(`       Title: ${bestProfile.matchedTitle}`);
 
     // Extract employer info from title/snippet
     const profileData = this.parseLinkedInTitle(bestProfile.title, bestProfile.snippet);
 
     // Also try to scrape the actual profile page for more data
-    console.log(`    📄 Scraping LinkedIn profile page...`);
+    console.log(`    📄 Fetching LinkedIn profile details...`);
     const pageContent = await this.fetchPage(bestProfile.url);
 
     if (pageContent && pageContent.length > 100) {
@@ -309,8 +338,18 @@ class LinkedInService {
         profileData.allEmployers = [...new Set([...profileData.employers, ...pageEmployers])];
         console.log(`       🏢 Employers found: ${profileData.allEmployers.join(', ')}`);
       }
+
+      // Double-check title from page content if not confirmed
+      if (!bestProfile.isValidTitle) {
+        const pageTitle = this.checkValidTitle(pageContent, '');
+        if (pageTitle.isValid) {
+          bestProfile.isValidTitle = true;
+          bestProfile.matchedTitle = pageTitle.matchedTitle;
+          console.log(`       ✅ Title confirmed from page: ${pageTitle.matchedTitle}`);
+        }
+      }
     } else {
-      console.log(`       ⚠️ Could not scrape profile (LinkedIn may block bots)`);
+      console.log(`       ⚠️ Could not fetch profile details`);
       profileData.pageContent = '';
     }
 
@@ -325,6 +364,9 @@ class LinkedInService {
       pageContent: profileData.pageContent || '',
       usLocation: bestProfile.usLocation,
       matchedTitle: bestProfile.matchedTitle,
+      isUSConfirmed: bestProfile.isUS,
+      isTitleConfirmed: bestProfile.isValidTitle,
+      filterScore: bestProfile.score,
       raw: bestProfile
     };
   }

@@ -6,17 +6,25 @@
  *
  * This service implements the FULL NPI monitoring workflow:
  * 1. Search NPPES NPI Registry by name to get NPI number
- * 2. Query multiple sources for all practice addresses:
- *    - NPPES (primary)
+ * 2. Query MULTIPLE sources for all practice addresses:
+ *    - NPPES (primary/official)
  *    - CMS Medicare Provider Data (shows ALL practice affiliations)
- * 3. Google search for businesses at each address
- * 4. Match business names against client + parent companies
+ *    - NPIDB.org (third-party aggregator)
+ *    - NPINo.com (third-party mirror)
+ *    - NPIProfile.com (third-party profile site)
+ *    - DocInfo.org (doctor information)
+ *    - Zocdoc (appointment/practice info)
+ *    - Vitals.com (healthcare provider directory)
+ *    - WebMD (provider directory)
+ * 3. Match business names against client + parent companies
  *
  * API Documentation:
  * - NPPES: https://npiregistry.cms.hhs.gov/api-page
  * - CMS Medicare: https://data.cms.gov/provider-data/api
+ * - Third-party sites: searched via Serper.dev Google Search API
  *
- * APIs are FREE - no API key required!
+ * NPPES/CMS APIs are FREE - no API key required!
+ * Third-party searches require SERPER_API_KEY
  */
 
 const https = require('https');
@@ -28,18 +36,293 @@ class NPIService {
     this.apiVersion = '2.1';
     this.initialized = false;
 
+    // Serper.dev API for third-party site searches
+    this.serperApiKey = process.env.SERPER_API_KEY || '';
+    this.serperEndpoint = 'google.serper.dev';
+
     // Rate limiting: NPPES recommends max 200 requests per minute
     this.requestDelay = 350; // ms between requests (safe rate)
     this.lastRequestTime = 0;
+
+    // Third-party NPI sites to search
+    this.thirdPartySites = [
+      { name: 'NPIDB', domain: 'npidb.org', searchPattern: 'site:npidb.org' },
+      { name: 'NPINo', domain: 'npino.com', searchPattern: 'site:npino.com' },
+      { name: 'NPIProfile', domain: 'npiprofile.com', searchPattern: 'site:npiprofile.com' },
+      { name: 'DocInfo', domain: 'docinfo.org', searchPattern: 'site:docinfo.org' },
+      { name: 'Zocdoc', domain: 'zocdoc.com', searchPattern: 'site:zocdoc.com' },
+      { name: 'Vitals', domain: 'vitals.com', searchPattern: 'site:vitals.com' },
+      { name: 'WebMD', domain: 'webmd.com/doctor', searchPattern: 'site:webmd.com/doctor' }
+    ];
   }
 
   /**
    * Initialize the NPI service
    */
   async initialize() {
-    console.log('✓ NPI Registry Service (COMPREHENSIVE - NPPES + CMS Medicare)');
+    const sources = ['NPPES', 'CMS Medicare'];
+    if (this.serperApiKey) {
+      sources.push('NPIDB', 'NPINo', 'NPIProfile', 'DocInfo', 'Zocdoc', 'Vitals', 'WebMD');
+    }
+    console.log(`✓ NPI Registry Service (${sources.join(' + ')})`);
     this.initialized = true;
     return true;
+  }
+
+  /**
+   * Make a Serper.dev search request
+   */
+  async serperSearch(query, numResults = 5) {
+    if (!this.serperApiKey) return null;
+
+    return new Promise((resolve) => {
+      const postData = JSON.stringify({
+        q: query,
+        num: numResults
+      });
+
+      const options = {
+        hostname: this.serperEndpoint,
+        path: '/search',
+        method: 'POST',
+        headers: {
+          'X-API-KEY': this.serperApiKey,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { resolve(null); }
+        });
+      });
+
+      req.on('error', () => resolve(null));
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  /**
+   * Search a third-party NPI site for provider info
+   * @param {string} fullName - Provider's full name
+   * @param {string} npiNumber - NPI number (if known)
+   * @param {object} site - Site config from thirdPartySites
+   */
+  async searchThirdPartySite(fullName, npiNumber, site) {
+    if (!this.serperApiKey) return null;
+
+    await this.rateLimit();
+
+    // Build search query
+    let query = `"${fullName}" ${site.searchPattern}`;
+    if (npiNumber) {
+      query = `"${npiNumber}" ${site.searchPattern}`;
+    }
+
+    const data = await this.serperSearch(query, 3);
+
+    if (!data || !data.organic || data.organic.length === 0) {
+      return null;
+    }
+
+    // Parse results for employer/practice info
+    const results = [];
+    for (const result of data.organic) {
+      const parsed = this.parseThirdPartyResult(result, site.name);
+      if (parsed) {
+        results.push(parsed);
+      }
+    }
+
+    return results.length > 0 ? results : null;
+  }
+
+  /**
+   * Parse a third-party site search result for employer info
+   */
+  parseThirdPartyResult(result, sourceName) {
+    const title = result.title || '';
+    const snippet = result.snippet || '';
+    const link = result.link || '';
+    const combined = `${title} ${snippet}`.toLowerCase();
+
+    // Extract organization/employer names from snippets
+    const employers = [];
+
+    // Common patterns for employer mentions
+    const patterns = [
+      /(?:works at|practicing at|affiliated with|employed by|at)\s+([A-Z][A-Za-z0-9\s&'.,-]{3,50}?)(?:\s+in|\s*[.,]|$)/gi,
+      /(?:practice|office|location|employer):\s*([A-Z][A-Za-z0-9\s&'.,-]{3,50}?)(?:\s*[.,|]|$)/gi,
+      /([A-Z][A-Za-z0-9\s&'.,-]*(?:Eye|Vision|Optical|Optometry|Medical|Health|Clinic|Center|Hospital|Associates|Group)[A-Za-z0-9\s&'.,-]*)/gi
+    ];
+
+    for (const pattern of patterns) {
+      const matches = snippet.matchAll(pattern);
+      for (const m of matches) {
+        const emp = m[1].trim();
+        if (emp.length > 3 && emp.length < 60 && !employers.includes(emp)) {
+          employers.push(emp);
+        }
+      }
+    }
+
+    // Extract location info
+    let location = null;
+    const locMatch = combined.match(/(?:in|located in)\s+([A-Za-z\s]+),\s*([A-Z]{2})/i);
+    if (locMatch) {
+      location = `${locMatch[1].trim()}, ${locMatch[2].toUpperCase()}`;
+    }
+
+    if (employers.length === 0 && !location) {
+      return null;
+    }
+
+    return {
+      source: sourceName,
+      url: link,
+      title: title,
+      snippet: snippet,
+      employers: employers,
+      location: location
+    };
+  }
+
+  /**
+   * Search ALL third-party NPI sites for a provider
+   */
+  async searchAllThirdPartySites(fullName, npiNumber = null) {
+    if (!this.serperApiKey) {
+      return [];
+    }
+
+    const allResults = [];
+
+    for (const site of this.thirdPartySites) {
+      try {
+        const results = await this.searchThirdPartySite(fullName, npiNumber, site);
+        if (results && results.length > 0) {
+          allResults.push(...results);
+        }
+      } catch (e) {
+        // Silently continue on error
+      }
+      // Small delay between sites
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    return allResults;
+  }
+
+  /**
+   * Google search for a company/address to find parent companies or related businesses
+   * @param {string} companyName - Company name from NPI
+   * @param {object} address - Address object with city, state
+   */
+  async googleSearchCompany(companyName, address) {
+    if (!this.serperApiKey || !companyName) return null;
+
+    await this.rateLimit();
+
+    // Build search query with company name and location
+    let query = `"${companyName}"`;
+    if (address && address.city && address.state) {
+      query += ` ${address.city}, ${address.state}`;
+    }
+    query += ' eye care optometry';
+
+    const data = await this.serperSearch(query, 5);
+
+    if (!data || !data.organic) return null;
+
+    const relatedCompanies = [];
+
+    for (const result of data.organic) {
+      const title = result.title || '';
+      const snippet = result.snippet || '';
+      const combined = `${title} ${snippet}`;
+
+      // Look for parent company patterns
+      const parentPatterns = [
+        /(?:part of|owned by|subsidiary of|division of|member of|affiliated with)\s+([A-Z][A-Za-z0-9\s&'.,-]{3,50})/gi,
+        /([A-Z][A-Za-z0-9\s&'.,-]+)\s+(?:owns|acquired|parent company)/gi
+      ];
+
+      for (const pattern of parentPatterns) {
+        const matches = combined.matchAll(pattern);
+        for (const m of matches) {
+          const company = m[1].trim();
+          if (company.length > 3 && company.length < 50 && !relatedCompanies.includes(company)) {
+            relatedCompanies.push(company);
+          }
+        }
+      }
+
+      // Also extract any company names from snippets
+      const companyPatterns = [
+        /([A-Z][A-Za-z0-9\s&'.,-]*(?:Eye|Vision|Optical|EyeCare|Optometry|Medical|Health)[A-Za-z0-9\s&'.,-]*)/g
+      ];
+
+      for (const pattern of companyPatterns) {
+        const matches = combined.matchAll(pattern);
+        for (const m of matches) {
+          const company = m[1].trim();
+          if (company.length > 5 && company.length < 50 &&
+              !relatedCompanies.includes(company) &&
+              company.toLowerCase() !== companyName.toLowerCase()) {
+            relatedCompanies.push(company);
+          }
+        }
+      }
+    }
+
+    return relatedCompanies.length > 0 ? relatedCompanies : null;
+  }
+
+  /**
+   * Google search an address to find what business is there
+   * @param {object} address - Address object
+   */
+  async googleSearchAddress(address) {
+    if (!this.serperApiKey || !address) return null;
+
+    const addressStr = `${address.line1} ${address.city} ${address.state}`.trim();
+    if (!addressStr || addressStr.length < 10) return null;
+
+    await this.rateLimit();
+
+    const query = `"${addressStr}" optometry eye care`;
+    const data = await this.serperSearch(query, 5);
+
+    if (!data || !data.organic) return null;
+
+    const businessesFound = [];
+
+    for (const result of data.organic) {
+      const title = result.title || '';
+      const snippet = result.snippet || '';
+
+      // Extract business names
+      const patterns = [
+        /([A-Z][A-Za-z0-9\s&'.,-]*(?:Eye|Vision|Optical|EyeCare|Optometry|Clinic|Center|Associates)[A-Za-z0-9\s&'.,-]*)/g
+      ];
+
+      for (const pattern of patterns) {
+        const matches = `${title} ${snippet}`.matchAll(pattern);
+        for (const m of matches) {
+          const business = m[1].trim();
+          if (business.length > 5 && business.length < 50 && !businessesFound.includes(business)) {
+            businessesFound.push(business);
+          }
+        }
+      }
+    }
+
+    return businessesFound.length > 0 ? businessesFound : null;
   }
 
   /**
@@ -282,9 +565,10 @@ class NPIService {
   /**
    * COMPREHENSIVE: Get ALL practice locations from multiple sources
    * @param {string} npiNumber - 10-digit NPI number
-   * @param {object} npiesData - Already fetched NPPES data (optional)
+   * @param {object} nppesData - Already fetched NPPES data (optional)
+   * @param {string} fullName - Provider's full name for third-party searches
    */
-  async getAllPracticeLocations(npiNumber, nppesData = null) {
+  async getAllPracticeLocations(npiNumber, nppesData = null, fullName = null) {
     const allLocations = [];
 
     // Source 1: NPPES (primary address)
@@ -297,28 +581,105 @@ class NPIService {
     }
 
     // Source 2: CMS Medicare Provider Data (ALL billing locations)
-    console.log(`    📋 Querying CMS Medicare for all practice locations...`);
+    console.log(`    📋 Querying CMS Medicare...`);
     const cmsLocations = await this.queryCMSMedicare(npiNumber);
 
     if (cmsLocations.length > 0) {
-      console.log(`    ✅ CMS found ${cmsLocations.length} practice location(s)`);
+      console.log(`    ✅ CMS: ${cmsLocations.length} location(s)`);
       allLocations.push(...cmsLocations);
-    } else {
-      console.log(`    ℹ️ No CMS Medicare records found`);
     }
 
-    // Deduplicate locations by address
+    // Source 3-9: Third-party NPI sites (via Serper)
+    if (this.serperApiKey && fullName) {
+      console.log(`    📋 Querying third-party NPI sites...`);
+      const thirdPartyResults = await this.searchAllThirdPartySites(fullName, npiNumber);
+
+      if (thirdPartyResults.length > 0) {
+        let sitesFound = new Set();
+        for (const result of thirdPartyResults) {
+          sitesFound.add(result.source);
+          // Add each employer found as a location
+          for (const employer of (result.employers || [])) {
+            allLocations.push({
+              organizationName: employer,
+              address: {
+                line1: '',
+                city: result.location ? result.location.split(',')[0].trim() : '',
+                state: result.location ? result.location.split(',')[1]?.trim() : '',
+                zip: ''
+              },
+              source: result.source,
+              sourceUrl: result.url
+            });
+          }
+        }
+        console.log(`    ✅ Third-party: Found data from ${Array.from(sitesFound).join(', ')}`);
+      }
+    }
+
+    // Source 10: Google search for each company name + address
+    if (this.serperApiKey && allLocations.length > 0) {
+      console.log(`    📋 Google searching company names & addresses...`);
+      const googleFoundCompanies = [];
+
+      for (const loc of allLocations.slice(0, 3)) { // Limit to first 3 to avoid too many API calls
+        // Search by company name
+        if (loc.organizationName) {
+          const relatedCompanies = await this.googleSearchCompany(loc.organizationName, loc.address);
+          if (relatedCompanies) {
+            for (const company of relatedCompanies) {
+              if (!googleFoundCompanies.includes(company)) {
+                googleFoundCompanies.push(company);
+                allLocations.push({
+                  organizationName: company,
+                  address: loc.address,
+                  source: 'Google (related company)',
+                  relatedTo: loc.organizationName
+                });
+              }
+            }
+          }
+        }
+
+        // Search by address
+        if (loc.address && loc.address.line1) {
+          const businessesAtAddress = await this.googleSearchAddress(loc.address);
+          if (businessesAtAddress) {
+            for (const business of businessesAtAddress) {
+              if (!googleFoundCompanies.includes(business)) {
+                googleFoundCompanies.push(business);
+                allLocations.push({
+                  organizationName: business,
+                  address: loc.address,
+                  source: 'Google (address search)'
+                });
+              }
+            }
+          }
+        }
+      }
+
+      if (googleFoundCompanies.length > 0) {
+        console.log(`    ✅ Google: Found ${googleFoundCompanies.length} related companies`);
+      }
+    }
+
+    // Deduplicate locations by organization name (more reliable than address for third-party)
     const uniqueLocations = [];
-    const seenAddresses = new Set();
+    const seenOrgs = new Set();
 
     for (const loc of allLocations) {
-      const key = `${loc.address.line1}-${loc.address.city}-${loc.address.state}`.toLowerCase();
-      if (!seenAddresses.has(key)) {
-        seenAddresses.add(key);
+      const orgKey = (loc.organizationName || '').toLowerCase().trim();
+      const addrKey = `${loc.address.line1}-${loc.address.city}-${loc.address.state}`.toLowerCase();
+      const key = orgKey || addrKey;
+
+      if (key && !seenOrgs.has(key)) {
+        seenOrgs.add(key);
         uniqueLocations.push(loc);
       }
     }
 
+    console.log(`    Found ${uniqueLocations.length} unique practice location(s) to check`);
     return uniqueLocations;
   }
 
@@ -431,8 +792,8 @@ class NPIService {
       return null;
     }
 
-    // Step 2: Get ALL practice locations
-    const allLocations = await this.getAllPracticeLocations(provider.npi, provider);
+    // Step 2: Get ALL practice locations (including third-party sites)
+    const allLocations = await this.getAllPracticeLocations(provider.npi, provider, candidate.full_name);
 
     if (allLocations.length === 0) {
       console.log(`    No practice locations found for ${candidate.full_name}`);
