@@ -501,6 +501,233 @@ class GoogleSearchService {
 
     return { match: false };
   }
+
+  /**
+   * NEW: Find all companies where a doctor is listed as working
+   *
+   * This searches for the doctor's name + "Optometrist/OD" and scrapes
+   * the result pages to find company websites that list them as staff.
+   *
+   * @param {string} fullName - Doctor's full name
+   * @returns {Array} List of companies found with source URLs
+   */
+  async findDoctorEmployers(fullName) {
+    console.log(`    🔍 Searching for employers of: ${fullName}`);
+
+    const employers = [];
+    const seenCompanies = new Set();
+
+    // Get cleaned name variants
+    const nameVariants = this.cleanName(fullName);
+    if (nameVariants.length === 0) {
+      console.log(`    ⚠️ Could not extract valid name from: "${fullName}"`);
+      return employers;
+    }
+
+    // Build search queries
+    const queries = [];
+    for (const name of nameVariants) {
+      queries.push(`"${name}" Optometrist`);
+      queries.push(`"${name}" OD optometry`);
+      queries.push(`"${name}" eye doctor`);
+    }
+
+    // Perform searches
+    const allResults = [];
+    for (const query of [...new Set(queries)].slice(0, 4)) { // Limit to 4 queries
+      try {
+        console.log(`    🔎 Query: ${query}`);
+        const searchResults = await this.performSearch(query);
+        if (searchResults && searchResults.length > 0) {
+          for (const result of searchResults) {
+            if (!allResults.find(r => r.link === result.link)) {
+              allResults.push(result);
+            }
+          }
+        }
+      } catch (e) {
+        // Continue on error
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    console.log(`    📊 Found ${allResults.length} search results`);
+
+    // Analyze each result to extract employer info
+    for (const result of allResults.slice(0, 10)) { // Check top 10 results
+      const url = result.link || '';
+      const title = result.title || '';
+      const snippet = result.snippet || '';
+
+      // Skip non-relevant sites
+      if (this.isDirectorySite(url)) continue;
+
+      // Extract company name from URL domain
+      const domainCompany = this.extractCompanyFromDomain(url);
+
+      // Extract company name from title/snippet
+      const contentCompanies = this.extractCompaniesFromText(`${title} ${snippet}`);
+
+      // Check if this looks like a practice website listing this doctor
+      const isStaffPage = this.looksLikeStaffPage(url, title, snippet);
+
+      // If it's a staff/team page, try to scrape for more details
+      if (isStaffPage && url) {
+        try {
+          console.log(`    📄 Scraping: ${url.substring(0, 60)}...`);
+          const pageText = await this.fetchPageContent(url, 5000);
+
+          if (pageText && pageText.length > 100) {
+            // Check if doctor's name appears on the page
+            const nameLower = nameVariants[0].toLowerCase();
+            if (pageText.toLowerCase().includes(nameLower)) {
+              // Extract company name from page
+              const pageCompanies = this.extractCompaniesFromText(pageText);
+
+              // Combine all found companies
+              const allCompanies = [...new Set([domainCompany, ...contentCompanies, ...pageCompanies].filter(Boolean))];
+
+              for (const company of allCompanies) {
+                const normCompany = company.toLowerCase().trim();
+                if (!seenCompanies.has(normCompany) && normCompany.length > 3) {
+                  seenCompanies.add(normCompany);
+                  employers.push({
+                    company: company,
+                    sourceUrl: url,
+                    sourceTitle: title,
+                    confidence: 'high',
+                    foundOn: 'company_website'
+                  });
+                  console.log(`    ✅ Found employer: ${company} (from ${url.substring(0, 40)}...)`);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // Continue on scrape error
+        }
+      } else if (domainCompany || contentCompanies.length > 0) {
+        // Even without scraping, record what we found
+        const allCompanies = [domainCompany, ...contentCompanies].filter(Boolean);
+        for (const company of allCompanies) {
+          const normCompany = company.toLowerCase().trim();
+          if (!seenCompanies.has(normCompany) && normCompany.length > 3) {
+            seenCompanies.add(normCompany);
+            employers.push({
+              company: company,
+              sourceUrl: url,
+              sourceTitle: title,
+              confidence: 'medium',
+              foundOn: 'search_result'
+            });
+          }
+        }
+      }
+    }
+
+    console.log(`    📊 Total employers found: ${employers.length}`);
+    return employers;
+  }
+
+  /**
+   * Check if URL is a directory/aggregator site (not a practice website)
+   */
+  isDirectorySite(url) {
+    if (!url) return true;
+    const directories = [
+      'zocdoc.com', 'healthgrades.com', 'vitals.com', 'webmd.com',
+      'yelp.com', 'yellowpages.com', 'npidb.org', 'npino.com',
+      'npiprofile.com', 'docinfo.org', 'doximity.com', 'linkedin.com',
+      'facebook.com', 'google.com', 'bing.com', 'indeed.com',
+      'glassdoor.com', 'wikipedia.org', 'bbb.org'
+    ];
+    return directories.some(d => url.includes(d));
+  }
+
+  /**
+   * Extract company name from domain
+   * e.g., "www.aegvision.com/doctors/smith" → "AEG Vision"
+   */
+  extractCompanyFromDomain(url) {
+    if (!url) return null;
+    try {
+      const hostname = new URL(url).hostname.replace('www.', '');
+      const domainParts = hostname.split('.')[0]; // Get first part before .com
+
+      // Skip generic domains
+      if (['google', 'bing', 'yahoo', 'facebook', 'linkedin', 'twitter'].includes(domainParts)) {
+        return null;
+      }
+
+      // Convert domain to readable name
+      // "aegvision" → "AEG Vision" (we'll do basic word splitting)
+      // "myeyedr" → "MyEyeDr"
+      let name = domainParts
+        .replace(/([a-z])([A-Z])/g, '$1 $2') // camelCase to spaces
+        .replace(/([a-z])(\d)/g, '$1 $2')    // letters-numbers
+        .replace(/(\d)([a-z])/g, '$1 $2');   // numbers-letters
+
+      // Capitalize first letter of each word
+      name = name.split(/[\s-]+/)
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+
+      return name.length > 2 ? name : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Extract company names from text (title, snippet, or page content)
+   */
+  extractCompaniesFromText(text) {
+    if (!text) return [];
+    const companies = [];
+
+    // Patterns for company names
+    const patterns = [
+      // "works at [Company]", "practicing at [Company]"
+      /(?:works?\s+at|practicing\s+at|employed\s+by|staff\s+at|team\s+at|part\s+of)\s+([A-Z][A-Za-z0-9\s&'.,-]{3,40}?)(?:\s+in|\s*[.,]|$)/gi,
+
+      // "[Company] Eye Care", "[Company] Vision", "[Company] Optical"
+      /([A-Z][A-Za-z0-9\s&'.,-]*(?:Eye\s*Care|Vision|Optical|Optometry|Eye\s*Center|Eye\s*Clinic|Eye\s*Associates|Eye\s*Group)[A-Za-z0-9\s&'.,-]*)/gi,
+
+      // "Welcome to [Company]" or "[Company] - Our Team"
+      /(?:Welcome\s+to|About)\s+([A-Z][A-Za-z0-9\s&'.,-]{3,40})/gi,
+
+      // "[Company] | Our Doctors" (title patterns)
+      /^([A-Z][A-Za-z0-9\s&'.,-]{3,40})\s*[\|–-]\s*(?:Our\s+)?(?:Doctors?|Team|Staff|Providers?)/i
+    ];
+
+    for (const pattern of patterns) {
+      const matches = text.matchAll(pattern);
+      for (const match of matches) {
+        const company = match[1].trim();
+        // Filter out generic terms
+        const genericTerms = ['the', 'our', 'your', 'this', 'that', 'home', 'about', 'contact', 'page'];
+        if (company.length > 3 && company.length < 60 &&
+            !genericTerms.includes(company.toLowerCase())) {
+          companies.push(company);
+        }
+      }
+    }
+
+    return [...new Set(companies)];
+  }
+
+  /**
+   * Check if a URL/title looks like a staff/team page
+   */
+  looksLikeStaffPage(url, title, snippet) {
+    const combined = `${url} ${title} ${snippet}`.toLowerCase();
+    const staffIndicators = [
+      'our-team', 'our-doctors', 'our-staff', 'meet-our',
+      'providers', 'physicians', 'optometrists', 'doctors',
+      'team', 'staff', 'about-us', 'about/', 'meet-the'
+    ];
+    return staffIndicators.some(ind => combined.includes(ind));
+  }
 }
 
 module.exports = GoogleSearchService;

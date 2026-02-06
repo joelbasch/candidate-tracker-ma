@@ -501,10 +501,10 @@ class MonitoringScheduler {
       }
 
       // =========================================
-      // PHASE 6: Google Search
+      // PHASE 6: Google Search + Employer Discovery
       // =========================================
       console.log(`\n${'─'.repeat(70)}`);
-      console.log(`  PHASE 6: Google Search`);
+      console.log(`  PHASE 6: Google Search + Employer Discovery`);
       console.log(`${'─'.repeat(70)}`);
 
       if (this.googleSearch && this.googleSearch.apiKey) {
@@ -516,8 +516,79 @@ class MonitoringScheduler {
           console.log(`\n  🌐 ${candidate.full_name}`);
 
           try {
+            // METHOD 1: Standard search for candidate + check against clients
             const searchResults = await this.googleSearch.searchCandidate(candidate.full_name);
 
+            // METHOD 2: NEW - Find all employers from scraped websites
+            let foundEmployers = [];
+            if (typeof this.googleSearch.findDoctorEmployers === 'function') {
+              foundEmployers = await this.googleSearch.findDoctorEmployers(candidate.full_name);
+
+              if (foundEmployers.length > 0) {
+                console.log(`     📋 Found ${foundEmployers.length} potential employer(s) from web scraping`);
+
+                // Check each found employer against all client submissions
+                for (const employer of foundEmployers) {
+                  for (const submission of candidateSubmissions) {
+                    const clientName = submission.client_name || '';
+                    const matchKey = `${candidate.id}-${clientName.toLowerCase()}`;
+
+                    // Check if employer matches client or any subsidiary
+                    const employerNorm = employer.company.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+                    const clientNorm = clientName.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+
+                    let isMatch = employerNorm.includes(clientNorm) || clientNorm.includes(employerNorm);
+
+                    // Also check against client's known subsidiaries
+                    if (!isMatch && this.companyResearch) {
+                      const relation = this.companyResearch.areCompaniesRelated(employer.company, clientName);
+                      if (relation && relation.match) {
+                        isMatch = true;
+                      }
+                    }
+
+                    if (isMatch) {
+                      console.log(`     🚨 EMPLOYER MATCH: ${employer.company} → ${clientName}`);
+                      console.log(`        Source: ${employer.sourceUrl}`);
+
+                      // Track this match
+                      if (!matchTracker.has(matchKey)) {
+                        matchTracker.set(matchKey, {
+                          candidate_id: candidate.id,
+                          candidate_name: candidate.full_name,
+                          client_name: clientName,
+                          sources: [],
+                          matches: [],
+                          confidence: 'Low'
+                        });
+                      }
+
+                      const tracked = matchTracker.get(matchKey);
+                      if (!tracked.sources.includes('Google-Employer')) {
+                        tracked.sources.push('Google-Employer');
+                        tracked.matches.push({
+                          source: 'Google-Employer',
+                          details: `Found on company website: ${employer.company}`,
+                          employer_found: employer.company,
+                          google_source_url: employer.sourceUrl,
+                          confidence: employer.confidence
+                        });
+                        // Website listing is high confidence!
+                        if (employer.confidence === 'high') {
+                          tracked.confidence = 'High';
+                        } else if (tracked.confidence === 'Low') {
+                          tracked.confidence = 'Medium';
+                        }
+                      }
+
+                      results.bySource.google++;
+                    }
+                  }
+                }
+              }
+            }
+
+            // METHOD 1 continued: Check standard search results
             if (searchResults && searchResults.allResults && searchResults.allResults.length > 0) {
               console.log(`     ✅ Found ${searchResults.allResults.length} search results`);
 
