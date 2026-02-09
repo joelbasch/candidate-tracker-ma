@@ -162,10 +162,12 @@ class MonitoringScheduler {
     }
 
     // --- NPI Registry ---
-    // Workflow: 1) Search NPI for candidate → get practice address
-    //           2) Check if NPI employer directly matches client
-    //           3) If no direct match, Google search the address to find what practice is there
-    //           4) Check if practice at that address matches client (including parent companies)
+    // Workflow:
+    // 1) Search NPPES by candidate name → get NPI, addresses, employer
+    // 2) Query CMS Reassignment API → get ALL organizations they belong to
+    // 3) Check all org names (NPPES + CMS) against client
+    // 4) If no direct match, Google search each NPI address to see what's there
+    // 5) If still unclear, scrape pages for parent company names
     try {
       const npiResults = await this.npi.searchByName(candidate.full_name);
 
@@ -185,115 +187,147 @@ class MonitoringScheduler {
           }
 
           const npiAddress = relevantProvider.practiceAddress || {};
-          const employerName = relevantProvider.organizationName || '';
           const addrLine = npiAddress.line1 || '';
           const addrCity = npiAddress.city || '';
           const addrState = npiAddress.state || '';
           const addrZip = npiAddress.zip || '';
 
-          console.log(`    📍 NPI Address: ${addrLine}, ${addrCity}, ${addrState} ${addrZip}`);
-          if (employerName) console.log(`    🏢 NPI Employer: ${employerName}`);
+          console.log(`    📍 NPI: ${relevantProvider.fullName} (${relevantProvider.npi})`);
+          console.log(`    📍 Primary Address: ${addrLine}, ${addrCity}, ${addrState} ${addrZip}`);
+
+          // Collect ALL organization names from NPPES data
+          const allOrgNames = [...(relevantProvider.allOrgNames || [])];
+          if (allOrgNames.length > 0) {
+            console.log(`    🏢 NPPES Organizations: ${allOrgNames.join(', ')}`);
+          }
+
+          // Step 1: Query CMS Reassignment API for ALL affiliated organizations
+          let cmsOrgs = [];
+          try {
+            cmsOrgs = await this.npi.getOrganizations(relevantProvider.npi);
+            if (cmsOrgs.length > 0) {
+              console.log(`    🏥 CMS Organizations (${cmsOrgs.length}):`);
+              for (const org of cmsOrgs) {
+                console.log(`       - ${org.groupName} (${org.groupState})`);
+                if (!allOrgNames.includes(org.groupName)) {
+                  allOrgNames.push(org.groupName);
+                }
+              }
+            } else {
+              console.log(`    ℹ️ CMS Reassignment: No organizations found`);
+            }
+          } catch (e) {
+            console.log(`    ⚠️ CMS Reassignment error: ${e.message}`);
+          }
 
           let matched = false;
           let matchReason = '';
           let confidence = 'Medium';
           let matchSourceUrl = '';
 
-          // Step 1: Direct employer name match (if NPI has one listed)
-          if (employerName) {
-            const employerMatch = this.companyResearch.areCompaniesRelated(employerName, clientName);
-            if (employerMatch.match) {
+          // Step 2: Check ALL organization names against client
+          for (const orgName of allOrgNames) {
+            const orgMatch = this.companyResearch.areCompaniesRelated(orgName, clientName);
+            if (orgMatch.match) {
               matched = true;
-              matchReason = `NPI employer "${employerName}" matches client "${clientName}". ${employerMatch.reason}`;
+              matchReason = `Organization "${orgName}" matches client "${clientName}". ${orgMatch.reason}`;
               confidence = 'High';
-              console.log(`    🚨 Direct employer match: "${employerName}" → "${clientName}"`);
+              console.log(`    🚨 Organization match: "${orgName}" → "${clientName}"`);
+              break;
             }
           }
 
-          // Step 2: Google search the practice address to see what's there
-          if (!matched && addrLine && addrCity && addrState && this.googleSearch && this.googleSearch.apiKey) {
-            console.log(`    🔍 Searching NPI address to see what's there...`);
-
-            // Just search the address - don't add keywords, let Google show what's at this location
-            const addressQuery = `"${addrLine}" "${addrCity}" ${addrState}`;
-
-            const searchData = await this.googleSearch.makeRequest(addressQuery, 10);
-
-            if (searchData && (searchData.organic || searchData.places)) {
-              const allResults = [];
-
-              // Collect organic results
-              if (searchData.organic) {
-                for (const r of searchData.organic) {
-                  allResults.push({ title: r.title || '', snippet: r.snippet || '', link: r.link || '' });
-                }
-              }
-
-              // Collect local/places results (often have business names)
-              if (searchData.places) {
-                for (const p of searchData.places) {
-                  allResults.push({
-                    title: p.title || '',
-                    snippet: [p.type, p.address, p.phoneNumber].filter(Boolean).join(' - '),
-                    link: p.website || '',
-                    isLocal: true
-                  });
-                }
-              }
-
-              console.log(`    📊 Got ${allResults.length} results for address search`);
-
-              // Check if any results mention the client company
-              for (const result of allResults) {
-                const combined = `${result.title} ${result.snippet}`.toLowerCase();
-                const clientCheck = this.companyResearch.areCompaniesRelated(result.title, clientName);
-
-                if (clientCheck.match) {
-                  matched = true;
-                  matchReason = `NPI address (${addrLine}, ${addrCity}, ${addrState}) has "${result.title}" which matches client "${clientName}". ${clientCheck.reason}`;
-                  confidence = 'High';
-                  matchSourceUrl = result.link;
-                  console.log(`    🚨 Address match: "${result.title}" at NPI address matches "${clientName}"`);
-                  break;
-                }
-
-                // Also check snippet text for client name
-                const snippetCheck = this.companyResearch.areCompaniesRelated(result.snippet, clientName);
-                if (snippetCheck.match) {
-                  matched = true;
-                  matchReason = `NPI address (${addrLine}, ${addrCity}, ${addrState}) - search result mentions "${clientName}": "${result.title}"`;
-                  confidence = 'Medium';
-                  matchSourceUrl = result.link;
-                  console.log(`    🚨 Address snippet match: "${result.title}" mentions "${clientName}"`);
-                  break;
-                }
-              }
-
-              // Step 3: If still no match, scrape top results to check for parent company names
-              if (!matched) {
-                const pagesToCheck = allResults.filter(r => r.link && !r.isLocal).slice(0, 3);
-                for (const result of pagesToCheck) {
-                  try {
-                    const pageText = await this.googleSearch.fetchPageContent(result.link);
-                    if (pageText && pageText.length > 50) {
-                      const pageCheck = this.companyResearch.areCompaniesRelated(pageText.substring(0, 3000), clientName);
-                      if (pageCheck.match) {
-                        matched = true;
-                        matchReason = `NPI address (${addrLine}, ${addrCity}, ${addrState}) - page at "${result.title}" mentions "${clientName}" (parent/subsidiary). ${pageCheck.reason}`;
-                        confidence = 'Medium';
-                        matchSourceUrl = result.link;
-                        console.log(`    🚨 Page content match: "${result.link}" mentions "${clientName}"`);
-                        break;
-                      }
-                    }
-                  } catch (e) {
-                    // Skip failed pages
-                  }
-                }
-              }
+          // Step 3: If no direct org match, Google search each NPI address
+          if (!matched && this.googleSearch && this.googleSearch.apiKey) {
+            const addressesToSearch = relevantProvider.allAddresses || [];
+            // Add primary address if not in list
+            if (addrLine && !addressesToSearch.find(a => a.line1 === addrLine)) {
+              addressesToSearch.unshift({ line1: addrLine, city: addrCity, state: addrState });
             }
 
-            await new Promise(resolve => setTimeout(resolve, 500));
+            for (const addr of addressesToSearch) {
+              if (!addr.line1 || !addr.city || !addr.state) continue;
+              if (matched) break;
+
+              console.log(`    🔍 Searching address: "${addr.line1}" "${addr.city}" ${addr.state}`);
+              const addressQuery = `"${addr.line1}" "${addr.city}" ${addr.state}`;
+
+              try {
+                const searchData = await this.googleSearch.makeRequest(addressQuery, 10);
+
+                if (searchData && (searchData.organic || searchData.places)) {
+                  const allResults = [];
+
+                  if (searchData.organic) {
+                    for (const r of searchData.organic) {
+                      allResults.push({ title: r.title || '', snippet: r.snippet || '', link: r.link || '' });
+                    }
+                  }
+                  if (searchData.places) {
+                    for (const p of searchData.places) {
+                      allResults.push({
+                        title: p.title || '',
+                        snippet: [p.type, p.address, p.phoneNumber].filter(Boolean).join(' - '),
+                        link: p.website || '',
+                        isLocal: true
+                      });
+                    }
+                  }
+
+                  console.log(`    📊 Got ${allResults.length} results for address`);
+
+                  // Check titles and snippets for client match
+                  for (const result of allResults) {
+                    const titleCheck = this.companyResearch.areCompaniesRelated(result.title, clientName);
+                    if (titleCheck.match) {
+                      matched = true;
+                      matchReason = `Address ${addr.line1}, ${addr.city}, ${addr.state} has "${result.title}" which matches "${clientName}". ${titleCheck.reason}`;
+                      confidence = 'High';
+                      matchSourceUrl = result.link;
+                      console.log(`    🚨 Address match: "${result.title}" → "${clientName}"`);
+                      break;
+                    }
+
+                    const snippetCheck = this.companyResearch.areCompaniesRelated(result.snippet, clientName);
+                    if (snippetCheck.match) {
+                      matched = true;
+                      matchReason = `Address ${addr.line1}, ${addr.city}, ${addr.state} - result "${result.title}" mentions "${clientName}"`;
+                      confidence = 'Medium';
+                      matchSourceUrl = result.link;
+                      console.log(`    🚨 Snippet match: "${result.title}" mentions "${clientName}"`);
+                      break;
+                    }
+                  }
+
+                  // Step 4: Scrape top pages to check for parent company names
+                  if (!matched) {
+                    const pagesToCheck = allResults.filter(r => r.link && !r.isLocal).slice(0, 3);
+                    for (const result of pagesToCheck) {
+                      try {
+                        const pageText = await this.googleSearch.fetchPageContent(result.link);
+                        if (pageText && pageText.length > 50) {
+                          const pageCheck = this.companyResearch.areCompaniesRelated(pageText.substring(0, 3000), clientName);
+                          if (pageCheck.match) {
+                            matched = true;
+                            matchReason = `Address ${addr.line1}, ${addr.city}, ${addr.state} - page "${result.title}" mentions "${clientName}" (parent/subsidiary). ${pageCheck.reason}`;
+                            confidence = 'Medium';
+                            matchSourceUrl = result.link;
+                            console.log(`    🚨 Page content: "${result.link}" mentions "${clientName}"`);
+                            break;
+                          }
+                        }
+                      } catch (e) {
+                        // Skip failed pages
+                      }
+                    }
+                  }
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 500));
+              } catch (e) {
+                console.log(`    ⚠️ Address search error: ${e.message}`);
+              }
+            }
           }
 
           if (matched && !this.alertExists(candidate.id, clientName, 'NPI')) {
@@ -303,7 +337,7 @@ class MonitoringScheduler {
               client_name: clientName,
               source: 'NPI Registry',
               confidence: confidence,
-              match_details: `NPI ${relevantProvider.npi} - ${relevantProvider.fullName} practicing at ${addrLine}, ${addrCity}, ${addrState}. ${matchReason}`,
+              match_details: `NPI ${relevantProvider.npi} - ${relevantProvider.fullName} at ${addrLine}, ${addrCity}, ${addrState}. ${matchReason}`,
               npi_number: relevantProvider.npi,
               npi_location: `${addrCity}, ${addrState}`.toUpperCase(),
               google_source_url: matchSourceUrl || null
@@ -312,7 +346,7 @@ class MonitoringScheduler {
             results.npiAlerts++;
             candidateResults.npi = true;
           } else if (!matched) {
-            console.log(`    ℹ️ NPI: No client match at practice address`);
+            console.log(`    ℹ️ NPI: No client match found`);
           }
         }
       } else {
