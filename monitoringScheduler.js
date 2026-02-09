@@ -162,6 +162,10 @@ class MonitoringScheduler {
     }
 
     // --- NPI Registry ---
+    // Workflow: 1) Search NPI for candidate → get practice address
+    //           2) Check if NPI employer directly matches client
+    //           3) If no direct match, Google search the address to find what practice is there
+    //           4) Check if practice at that address matches client (including parent companies)
     try {
       const npiResults = await this.npi.searchByName(candidate.full_name);
 
@@ -181,49 +185,136 @@ class MonitoringScheduler {
           }
 
           const npiAddress = relevantProvider.practiceAddress || {};
-          const npiLocation = {
-            city: (npiAddress.city || '').toLowerCase(),
-            state: (npiAddress.state || '').toLowerCase()
-          };
           const employerName = relevantProvider.organizationName || '';
+          const addrLine = npiAddress.line1 || '';
+          const addrCity = npiAddress.city || '';
+          const addrState = npiAddress.state || '';
+          const addrZip = npiAddress.zip || '';
 
-          const employerMatch = this.companyResearch.areCompaniesRelated(employerName, clientName);
-          const jobLocation = this.extractLocation(jobTitle);
-          const clientLocation = this.extractLocation(clientName);
-          const locationMatchJob = this.locationsMatch(npiLocation, jobLocation);
-          const locationMatchClient = this.locationsMatch(npiLocation, clientLocation);
-          const locationMatch = locationMatchJob.match ? locationMatchJob : locationMatchClient;
+          console.log(`    📍 NPI Address: ${addrLine}, ${addrCity}, ${addrState} ${addrZip}`);
+          if (employerName) console.log(`    🏢 NPI Employer: ${employerName}`);
 
-          // Only alert if employer name matches (location alone is not enough)
-          if (employerMatch.match && !this.alertExists(candidate.id, clientName, 'NPI')) {
-            let matchReason = '';
-            let confidence = 'Medium';
+          let matched = false;
+          let matchReason = '';
+          let confidence = 'Medium';
+          let matchSourceUrl = '';
 
-            if (employerMatch.match && locationMatch.match) {
-              matchReason = `Employer AND Location match! NPI shows ${relevantProvider.fullName} at "${employerName}" in ${npiLocation.city}, ${npiLocation.state.toUpperCase()}`;
+          // Step 1: Direct employer name match (if NPI has one listed)
+          if (employerName) {
+            const employerMatch = this.companyResearch.areCompaniesRelated(employerName, clientName);
+            if (employerMatch.match) {
+              matched = true;
+              matchReason = `NPI employer "${employerName}" matches client "${clientName}". ${employerMatch.reason}`;
               confidence = 'High';
-            } else {
-              matchReason = `Employer match: ${employerMatch.reason}`;
-              confidence = 'High';
+              console.log(`    🚨 Direct employer match: "${employerName}" → "${clientName}"`);
+            }
+          }
+
+          // Step 2: Google search the practice address to find what's there
+          if (!matched && addrCity && addrState && this.googleSearch && this.googleSearch.apiKey) {
+            console.log(`    🔍 Searching address for eye care practices...`);
+
+            // Build address search query
+            const addressQuery = addrLine
+              ? `"${addrLine}" "${addrCity}" ${addrState} optometrist eye care`
+              : `optometrist eye care "${addrCity}" ${addrState} "${relevantProvider.fullName}"`;
+
+            const searchData = await this.googleSearch.makeRequest(addressQuery, 10);
+
+            if (searchData && (searchData.organic || searchData.places)) {
+              const allResults = [];
+
+              // Collect organic results
+              if (searchData.organic) {
+                for (const r of searchData.organic) {
+                  allResults.push({ title: r.title || '', snippet: r.snippet || '', link: r.link || '' });
+                }
+              }
+
+              // Collect local/places results (often have business names)
+              if (searchData.places) {
+                for (const p of searchData.places) {
+                  allResults.push({
+                    title: p.title || '',
+                    snippet: [p.type, p.address, p.phoneNumber].filter(Boolean).join(' - '),
+                    link: p.website || '',
+                    isLocal: true
+                  });
+                }
+              }
+
+              console.log(`    📊 Got ${allResults.length} results for address search`);
+
+              // Check if any results mention the client company
+              for (const result of allResults) {
+                const combined = `${result.title} ${result.snippet}`.toLowerCase();
+                const clientCheck = this.companyResearch.areCompaniesRelated(result.title, clientName);
+
+                if (clientCheck.match) {
+                  matched = true;
+                  matchReason = `NPI address (${addrLine}, ${addrCity}, ${addrState}) has "${result.title}" which matches client "${clientName}". ${clientCheck.reason}`;
+                  confidence = 'High';
+                  matchSourceUrl = result.link;
+                  console.log(`    🚨 Address match: "${result.title}" at NPI address matches "${clientName}"`);
+                  break;
+                }
+
+                // Also check snippet text for client name
+                const snippetCheck = this.companyResearch.areCompaniesRelated(result.snippet, clientName);
+                if (snippetCheck.match) {
+                  matched = true;
+                  matchReason = `NPI address (${addrLine}, ${addrCity}, ${addrState}) - search result mentions "${clientName}": "${result.title}"`;
+                  confidence = 'Medium';
+                  matchSourceUrl = result.link;
+                  console.log(`    🚨 Address snippet match: "${result.title}" mentions "${clientName}"`);
+                  break;
+                }
+              }
+
+              // Step 3: If still no match, scrape top results to check for parent company names
+              if (!matched) {
+                const pagesToCheck = allResults.filter(r => r.link && !r.isLocal).slice(0, 3);
+                for (const result of pagesToCheck) {
+                  try {
+                    const pageText = await this.googleSearch.fetchPageContent(result.link);
+                    if (pageText && pageText.length > 50) {
+                      const pageCheck = this.companyResearch.areCompaniesRelated(pageText.substring(0, 3000), clientName);
+                      if (pageCheck.match) {
+                        matched = true;
+                        matchReason = `NPI address (${addrLine}, ${addrCity}, ${addrState}) - page at "${result.title}" mentions "${clientName}" (parent/subsidiary). ${pageCheck.reason}`;
+                        confidence = 'Medium';
+                        matchSourceUrl = result.link;
+                        console.log(`    🚨 Page content match: "${result.link}" mentions "${clientName}"`);
+                        break;
+                      }
+                    }
+                  } catch (e) {
+                    // Skip failed pages
+                  }
+                }
+              }
             }
 
-            console.log(`    🚨 NPI MATCH: ${employerName} → ${clientName}`);
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
 
+          if (matched && !this.alertExists(candidate.id, clientName, 'NPI')) {
             this.createAlert({
               candidate_id: candidate.id,
               candidate_name: candidate.full_name,
               client_name: clientName,
               source: 'NPI Registry',
               confidence: confidence,
-              match_details: `NPI ${relevantProvider.npi} shows ${relevantProvider.fullName} practicing in ${npiLocation.city || 'Unknown'}, ${(npiLocation.state || 'Unknown').toUpperCase()}. ${matchReason}`,
+              match_details: `NPI ${relevantProvider.npi} - ${relevantProvider.fullName} practicing at ${addrLine}, ${addrCity}, ${addrState}. ${matchReason}`,
               npi_number: relevantProvider.npi,
-              npi_location: `${npiLocation.city}, ${npiLocation.state}`.toUpperCase()
+              npi_location: `${addrCity}, ${addrState}`.toUpperCase(),
+              google_source_url: matchSourceUrl || null
             });
             results.alertsCreated++;
             results.npiAlerts++;
             candidateResults.npi = true;
-          } else {
-            console.log(`    ℹ️ NPI: No employer match`);
+          } else if (!matched) {
+            console.log(`    ℹ️ NPI: No client match at practice address`);
           }
         }
       } else {
