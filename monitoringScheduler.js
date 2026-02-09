@@ -566,14 +566,26 @@ class MonitoringScheduler {
     await new Promise(resolve => setTimeout(resolve, 100));
 
     // --- LinkedIn ---
+    // Step 1: Google search to find LinkedIn profile URL (free via Serper)
+    // Step 2: Netrows API to get full employment history (if configured)
+    // Step 3: Match all employers (current + past) against client
     if (this.linkedin && this.linkedin.configured && !this.alertExists(candidate.id, clientName, 'LinkedIn')) {
       try {
         const profileData = await this.linkedin.findProfile(candidate.full_name);
 
         if (profileData && profileData.found) {
+          // Save LinkedIn URL to candidate record
           if (!candidate.linkedin_url && profileData.profileUrl) {
             candidate.linkedin_url = profileData.profileUrl;
             this.db.saveDatabase();
+          }
+
+          // Log data source
+          if (profileData.dataSource === 'netrows') {
+            const histCount = (profileData.employmentHistory || []).length;
+            console.log(`    📡 Data source: Netrows (${histCount} positions in history)`);
+          } else {
+            console.log(`    📡 Data source: Google snippet (limited employer data)`);
           }
 
           const clientMatch = this.linkedin.checkProfileForClient(profileData, clientName, this.companyResearch);
@@ -581,7 +593,7 @@ class MonitoringScheduler {
           if (clientMatch && clientMatch.match) {
             console.log(`    🚨 LINKEDIN MATCH: ${clientMatch.reason}`);
 
-            this.createAlert({
+            const alertData = {
               candidate_id: candidate.id,
               candidate_name: candidate.full_name,
               client_name: clientName,
@@ -591,12 +603,19 @@ class MonitoringScheduler {
               linkedin_url: profileData.profileUrl,
               linkedin_employer: clientMatch.employer || profileData.currentEmployer,
               linkedin_title: clientMatch.title || profileData.currentTitle
-            });
+            };
+
+            // Include employment dates if available (from Netrows)
+            if (clientMatch.startDate) {
+              alertData.match_details += ` | Started: ${clientMatch.startDate}`;
+            }
+
+            this.createAlert(alertData);
             results.alertsCreated++;
             results.linkedinAlerts++;
             candidateResults.linkedin = true;
           } else {
-            console.log(`    ℹ️ LinkedIn: ${profileData.found ? 'Profile found, no client match' : 'No profile found'}`);
+            console.log(`    ℹ️ LinkedIn: Profile found, no client match`);
           }
         } else {
           console.log(`    ℹ️ LinkedIn: ${profileData?.reason || 'No profile found'}`);

@@ -1,13 +1,12 @@
 /**
- * LinkedIn Service - Enhanced with Serper.dev
+ * LinkedIn Service - Enhanced with Serper.dev + Netrows API
  *
- * Uses Google Search (via Serper.dev - 2,500 free searches/month) to find LinkedIn profiles and extract:
- * - Current employer / company
- * - Job title
- * - Whether they recently changed jobs
- * - Whether their profile mentions the client company
+ * Two-step approach:
+ * 1) Google Search (Serper.dev - free) to FIND the LinkedIn profile URL
+ * 2) Netrows API (netrows.com - 100 free credits) to GET full profile data
+ *    including complete employment history with start/end dates
  *
- * Also scrapes the LinkedIn profile page for deeper content analysis.
+ * Falls back to Google snippet parsing if Netrows is not configured.
  */
 
 const https = require('https');
@@ -15,15 +14,26 @@ const http = require('http');
 
 class LinkedInService {
   constructor() {
-    // Support both old SERPAPI keys (for migration) and new SERPER key
+    // Serper.dev for Google search (finding LinkedIn URLs)
     this.apiKey = process.env.SERPER_API_KEY || process.env.SERPAPI_KEY || process.env.SERPAPI_API_KEY || '';
     this.configured = !!this.apiKey;
     this.apiEndpoint = 'google.serper.dev';
+
+    // Netrows API for full LinkedIn profile data
+    this.netrowsApiKey = process.env.NETROWS_API_KEY || '';
+    this.netrowsConfigured = !!this.netrowsApiKey;
+    this.netrowsEndpoint = 'api.netrows.com';
 
     if (this.configured) {
       console.log(`✓ LinkedIn Service configured (via Serper.dev)`);
     } else {
       console.log(`⚠ LinkedIn Service: Missing SERPER_API_KEY - LinkedIn checks disabled`);
+    }
+
+    if (this.netrowsConfigured) {
+      console.log(`✓ Netrows API configured (full LinkedIn profile data)`);
+    } else {
+      console.log(`⚠ Netrows API: Missing NETROWS_API_KEY - using Google snippet only`);
     }
   }
 
@@ -61,6 +71,164 @@ class LinkedInService {
       req.write(postData);
       req.end();
     });
+  }
+
+  /**
+   * Extract LinkedIn username from a profile URL
+   * e.g., "https://www.linkedin.com/in/chandra-dunn" → "chandra-dunn"
+   */
+  extractUsername(linkedinUrl) {
+    if (!linkedinUrl) return null;
+    const match = linkedinUrl.match(/linkedin\.com\/in\/([^/?#]+)/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Call Netrows API to get full LinkedIn profile data
+   * Endpoint: GET /v1/people/profile?username={username}
+   * Returns complete employment history with dates
+   */
+  async getFullProfile(username) {
+    if (!this.netrowsConfigured || !username) return null;
+
+    return new Promise((resolve) => {
+      const options = {
+        hostname: this.netrowsEndpoint,
+        path: `/v1/people/profile?username=${encodeURIComponent(username)}`,
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.netrowsApiKey}`,
+          'Accept': 'application/json'
+        },
+        timeout: 15000
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            console.log(`    ⚠️ Netrows API returned ${res.statusCode}`);
+            resolve(null);
+            return;
+          }
+          try {
+            const profile = JSON.parse(data);
+            resolve(profile);
+          } catch (e) {
+            console.log(`    ⚠️ Netrows API parse error: ${e.message}`);
+            resolve(null);
+          }
+        });
+      });
+
+      req.on('error', (e) => {
+        console.log(`    ⚠️ Netrows API error: ${e.message}`);
+        resolve(null);
+      });
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.end();
+    });
+  }
+
+  /**
+   * Parse Netrows profile response into standardized employment data
+   * Handles various response formats and extracts all employers with dates
+   */
+  parseNetrowsProfile(profile) {
+    if (!profile) return null;
+
+    const result = {
+      fullName: null,
+      headline: null,
+      location: null,
+      currentEmployer: null,
+      currentTitle: null,
+      employers: [],         // Array of company name strings (for backward compat)
+      employmentHistory: [],  // Full history with dates
+      education: [],
+      skills: []
+    };
+
+    // Extract basic info - handle various field names
+    result.fullName = profile.full_name || profile.fullName || profile.name ||
+      [profile.first_name || profile.firstName, profile.last_name || profile.lastName].filter(Boolean).join(' ') || null;
+    result.headline = profile.headline || profile.tagline || null;
+    result.location = profile.location || profile.geo_location || null;
+
+    // Extract employment history - handle various response structures
+    const experiences = profile.experiences || profile.employment_history || profile.positions ||
+      profile.experience || profile.work_experience || [];
+
+    // Handle if experiences is nested (e.g., { data: [...] })
+    const expArray = Array.isArray(experiences) ? experiences : (experiences.data || experiences.values || []);
+
+    for (const exp of expArray) {
+      if (!exp) continue;
+
+      const company = exp.company || exp.company_name || exp.organization || exp.companyName ||
+        (exp.company_info && (exp.company_info.name || exp.company_info.company_name)) || null;
+      const title = exp.title || exp.position || exp.role || exp.job_title || null;
+      const startDate = exp.start_date || exp.starts_at || exp.from || exp.startDate || null;
+      const endDate = exp.end_date || exp.ends_at || exp.to || exp.endDate || null;
+      const isCurrent = exp.current === true || exp.is_current === true || endDate === null || endDate === 'Present';
+      const location = exp.location || exp.geo_location || null;
+
+      if (company) {
+        const entry = {
+          company: typeof company === 'string' ? company : (company.name || company.company_name || String(company)),
+          title: title,
+          startDate: startDate,
+          endDate: endDate,
+          current: isCurrent,
+          location: location
+        };
+
+        result.employmentHistory.push(entry);
+
+        // Add to flat employers list
+        if (!result.employers.includes(entry.company)) {
+          result.employers.push(entry.company);
+        }
+
+        // Track current employer
+        if (isCurrent && !result.currentEmployer) {
+          result.currentEmployer = entry.company;
+          result.currentTitle = entry.title;
+        }
+      }
+    }
+
+    // If no current employer found from history, try headline
+    if (!result.currentEmployer && result.headline) {
+      const atMatch = result.headline.match(/(?:at|@)\s+(.+?)(?:\s*[\|·]|$)/i);
+      if (atMatch) {
+        result.currentEmployer = atMatch[1].trim();
+      }
+    }
+
+    // Extract education
+    const education = profile.education || profile.educations || [];
+    const eduArray = Array.isArray(education) ? education : (education.data || education.values || []);
+    for (const edu of eduArray) {
+      if (edu && (edu.school || edu.institution || edu.school_name)) {
+        result.education.push({
+          school: edu.school || edu.institution || edu.school_name,
+          degree: edu.degree || edu.degree_name || null,
+          field: edu.field || edu.field_of_study || null
+        });
+      }
+    }
+
+    // Extract skills
+    const skills = profile.skills || [];
+    const skillArray = Array.isArray(skills) ? skills : (skills.data || skills.values || []);
+    for (const skill of skillArray) {
+      if (typeof skill === 'string') result.skills.push(skill);
+      else if (skill && (skill.name || skill.skill)) result.skills.push(skill.name || skill.skill);
+    }
+
+    return result;
   }
 
   /**
@@ -352,11 +520,56 @@ class LinkedInService {
 
     console.log(`    ✅ Found LinkedIn: ${bestProfile.url}`);
 
-    // Extract employer info from the Google search result title/snippet
+    // --- STEP 2: If Netrows is configured, get FULL profile data ---
+    if (this.netrowsConfigured) {
+      const username = this.extractUsername(bestProfile.url);
+      if (username) {
+        console.log(`    📡 Fetching full profile via Netrows (${username})...`);
+        const rawProfile = await this.getFullProfile(username);
+
+        if (rawProfile) {
+          const fullProfile = this.parseNetrowsProfile(rawProfile);
+
+          if (fullProfile) {
+            console.log(`    ✅ Netrows: Got full profile data`);
+            if (fullProfile.currentEmployer) {
+              console.log(`    🏢 Current: ${fullProfile.currentTitle || 'N/A'} at ${fullProfile.currentEmployer}`);
+            }
+            if (fullProfile.employmentHistory.length > 1) {
+              console.log(`    📋 Employment history: ${fullProfile.employmentHistory.length} positions`);
+              for (const job of fullProfile.employmentHistory.slice(0, 5)) {
+                const dates = [job.startDate, job.endDate || 'Present'].filter(Boolean).join(' - ');
+                console.log(`       ${job.current ? '→' : ' '} ${job.title || 'N/A'} at ${job.company} (${dates})`);
+              }
+            }
+
+            return {
+              found: true,
+              profileUrl: bestProfile.url,
+              profileTitle: bestProfile.title,
+              profileSnippet: bestProfile.snippet,
+              currentEmployer: fullProfile.currentEmployer,
+              currentTitle: fullProfile.currentTitle,
+              employers: fullProfile.employers,
+              employmentHistory: fullProfile.employmentHistory,
+              matchScore: best.score,
+              pageContent: '',
+              raw: bestProfile,
+              netrowsData: fullProfile,
+              dataSource: 'netrows'
+            };
+          }
+        } else {
+          console.log(`    ⚠️ Netrows: Could not fetch profile, falling back to Google snippet`);
+        }
+      }
+    }
+
+    // --- FALLBACK: Extract employer info from Google search result title/snippet ---
     const profileData = this.parseLinkedInTitle(bestProfile.title, bestProfile.snippet);
 
     if (profileData.currentEmployer) {
-      console.log(`     🏢 Employer: ${profileData.currentEmployer}`);
+      console.log(`    🏢 Employer (from snippet): ${profileData.currentEmployer}`);
     }
 
     return {
@@ -369,7 +582,8 @@ class LinkedInService {
       employers: profileData.allEmployers || profileData.employers,
       matchScore: best.score,
       pageContent: '',
-      raw: bestProfile
+      raw: bestProfile,
+      dataSource: 'google_snippet'
     };
   }
 
@@ -472,6 +686,7 @@ class LinkedInService {
   /**
    * Check if LinkedIn profile data mentions a specific client company
    * Uses direct matching, fuzzy matching, and parent company relationships
+   * Enhanced: uses full employment history from Netrows when available
    */
   checkProfileForClient(profileData, clientName, companyResearch) {
     if (!profileData || !profileData.found) return { match: false };
@@ -482,23 +697,39 @@ class LinkedInService {
     };
 
     const normClient = normalize(clientName);
-    
+
     // Build list of names to check (client + subsidiaries + parent companies)
     const namesToCheck = [normClient];
-    
+
     if (companyResearch && typeof companyResearch.getAllRelationships === 'function') {
       try {
         const allRels = companyResearch.getAllRelationships();
+        // FIX: getAllRelationships() returns { manual: [...], cached: [...] }, not an array
+        // Extract relationships from both manual and cached sources
+        let relEntries = [];
         if (Array.isArray(allRels)) {
-          for (const rel of allRels) {
-            const normParent = normalize(rel.parent);
-            const isRelevant = normParent === normClient ||
-              (rel.subsidiaries || []).some(s => normalize(s) === normClient);
-            if (isRelevant) {
-              namesToCheck.push(normParent);
-              for (const sub of (rel.subsidiaries || [])) {
-                namesToCheck.push(normalize(sub));
-              }
+          relEntries = allRels;
+        } else if (allRels && typeof allRels === 'object') {
+          // Handle the { manual: [...], cached: [...] } format
+          const manual = allRels.manual || [];
+          const cached = allRels.cached || [];
+          if (Array.isArray(manual)) relEntries.push(...manual);
+          if (Array.isArray(cached)) relEntries.push(...cached);
+        }
+
+        for (const rel of relEntries) {
+          if (!rel) continue;
+          const parentName = rel.parent || rel.parentCompany || '';
+          const subs = rel.subsidiaries || rel.aliases || rel.children || [];
+          const normParent = normalize(parentName);
+          const subsArray = Array.isArray(subs) ? subs : [];
+
+          const isRelevant = normParent === normClient ||
+            subsArray.some(s => normalize(s) === normClient);
+          if (isRelevant) {
+            namesToCheck.push(normParent);
+            for (const sub of subsArray) {
+              namesToCheck.push(normalize(sub));
             }
           }
         }
@@ -525,8 +756,30 @@ class LinkedInService {
       }
     }
 
-    // CHECK 2: Any listed employer matches
-    if (profileData.employers && profileData.employers.length > 0) {
+    // CHECK 2: Full employment history (Netrows data — checks ALL past employers with dates)
+    if (profileData.employmentHistory && profileData.employmentHistory.length > 0) {
+      for (const job of profileData.employmentHistory) {
+        const normEmployer = normalize(job.company);
+        for (const name of uniqueNames) {
+          if (normEmployer.includes(name) || name.includes(normEmployer)) {
+            const dates = [job.startDate, job.endDate || 'Present'].filter(Boolean).join(' - ');
+            return {
+              match: true,
+              matchType: job.current ? 'current_employer' : 'past_employer',
+              confidence: job.current ? 'High' : 'Medium',
+              reason: `LinkedIn: ${job.current ? 'Current' : 'Past'} employer "${job.company}" (${dates}) matches "${clientName}"`,
+              employer: job.company,
+              title: job.title || profileData.currentTitle,
+              profileUrl: profileData.profileUrl,
+              startDate: job.startDate,
+              endDate: job.endDate
+            };
+          }
+        }
+      }
+    }
+    // CHECK 2b: Flat employers list fallback (Google snippet data)
+    else if (profileData.employers && profileData.employers.length > 0) {
       for (const employer of profileData.employers) {
         const normEmployer = normalize(employer);
         for (const name of uniqueNames) {
@@ -546,39 +799,7 @@ class LinkedInService {
       }
     }
 
-    // CHECK 3: Full page content search (deepest check)
-    if (profileData.pageContent) {
-      const normPage = normalize(profileData.pageContent);
-      for (const name of uniqueNames) {
-        if (normPage.includes(name)) {
-          return {
-            match: true,
-            matchType: 'page_mention',
-            confidence: 'Medium',
-            reason: `LinkedIn: Profile page content mentions "${clientName}"`,
-            employer: profileData.currentEmployer,
-            title: profileData.currentTitle,
-            profileUrl: profileData.profileUrl
-          };
-        }
-        
-        // Multi-word fuzzy: all significant words appear
-        const words = name.split(' ').filter(w => w.length > 3);
-        if (words.length >= 2 && words.every(w => normPage.includes(w))) {
-          return {
-            match: true,
-            matchType: 'page_mention_fuzzy',
-            confidence: 'Medium',
-            reason: `LinkedIn: Profile page references "${clientName}" (word match)`,
-            employer: profileData.currentEmployer,
-            title: profileData.currentTitle,
-            profileUrl: profileData.profileUrl
-          };
-        }
-      }
-    }
-
-    // CHECK 4: Title/snippet from search results
+    // CHECK 3: Title/snippet from search results
     const combinedText = normalize(`${profileData.profileTitle} ${profileData.profileSnippet}`);
     for (const name of uniqueNames) {
       if (combinedText.includes(name)) {
