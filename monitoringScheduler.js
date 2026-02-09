@@ -97,12 +97,12 @@ class MonitoringScheduler {
         return { match: true, reason: `City match: ${city1} / ${city2}, ${state1.toUpperCase()}` };
       }
       
-      // Cities are different but same state - lower confidence
-      return { match: true, reason: `Same state (${state1.toUpperCase()}), different city: ${city1} vs ${city2}`, confidence: 'Medium' };
+      // Cities are different - NOT a match
+      return { match: false };
     }
 
-    // Only state matches
-    return { match: true, reason: `Same state: ${state1.toUpperCase()}`, confidence: 'Low' };
+    // Only state, no city to compare - NOT a match
+    return { match: false };
   }
 
   /**
@@ -194,19 +194,17 @@ class MonitoringScheduler {
           const locationMatchClient = this.locationsMatch(npiLocation, clientLocation);
           const locationMatch = locationMatchJob.match ? locationMatchJob : locationMatchClient;
 
-          if ((employerMatch.match || locationMatch.match) && !this.alertExists(candidate.id, clientName, 'NPI')) {
+          // Only alert if employer name matches (location alone is not enough)
+          if (employerMatch.match && !this.alertExists(candidate.id, clientName, 'NPI')) {
             let matchReason = '';
             let confidence = 'Medium';
 
             if (employerMatch.match && locationMatch.match) {
               matchReason = `Employer AND Location match! NPI shows ${relevantProvider.fullName} at "${employerName}" in ${npiLocation.city}, ${npiLocation.state.toUpperCase()}`;
               confidence = 'High';
-            } else if (employerMatch.match) {
+            } else {
               matchReason = `Employer match: ${employerMatch.reason}`;
               confidence = 'High';
-            } else if (locationMatch.match) {
-              matchReason = `Location match: NPI shows practice in ${npiLocation.city}, ${npiLocation.state.toUpperCase()}. ${locationMatch.reason}`;
-              confidence = locationMatch.confidence || 'Medium';
             }
 
             console.log(`    🚨 NPI MATCH: ${employerName} → ${clientName}`);
