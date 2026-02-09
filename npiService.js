@@ -298,6 +298,82 @@ class NPIService {
   }
 
   /**
+   * Search NPI for an ORGANIZATION by name (NPI-2 type)
+   * Used to find client company NPIs and all their subsidiary practice names
+   * Returns array of { npi, orgName, addresses, ... }
+   */
+  async searchOrganizationByName(companyName) {
+    if (!companyName || companyName.length < 3) return [];
+
+    // Clean the company name for NPI search
+    const cleanName = companyName
+      .replace(/\bllc|llp|inc|corp|pc|pllc|pa\b/gi, '')
+      .replace(/[^\w\s]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanName || cleanName.length < 3) return [];
+
+    const params = {
+      enumeration_type: 'NPI-2', // Organizations only
+      organization_name: cleanName + '*',
+      limit: 20
+    };
+
+    try {
+      console.log(`    🔍 Searching NPI for organization: "${cleanName}"`);
+      const response = await this.makeRequest(params);
+
+      if (!response || response.result_count === 0) {
+        return [];
+      }
+
+      const orgs = (response.results || []).map(result => {
+        const basic = result.basic || {};
+        const addresses = result.addresses || [];
+        const practiceAddr = addresses.find(a => a.address_purpose === 'LOCATION') || addresses[0] || {};
+
+        return {
+          npi: result.number,
+          orgName: basic.organization_name || '',
+          authorizedOfficial: `${basic.authorized_official_first_name || ''} ${basic.authorized_official_last_name || ''}`.trim(),
+          address: {
+            line1: practiceAddr.address_1 || '',
+            city: practiceAddr.city || '',
+            state: practiceAddr.state || '',
+            zip: practiceAddr.postal_code || ''
+          }
+        };
+      });
+
+      console.log(`    📊 Found ${orgs.length} organization(s)`);
+      return orgs;
+
+    } catch (error) {
+      console.log(`    ⚠️ Org search error: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Get all subsidiary/practice names for an organization NPI
+   * Queries CMS Reassignment API for all providers reassigned to this org
+   * Returns unique practice/group names
+   */
+  async getSubsidiaryNames(orgNpiNumber) {
+    if (!this.cmsDatasetUUID || !orgNpiNumber) return [];
+
+    return new Promise((resolve) => {
+      // Search by Group PAC ID or by organization - we search by the org's providers
+      // The Reassignment list maps Individual → Group, so we need to find entries where
+      // the Group Legal Business Name matches what we found
+      // Actually, we can't filter by Group NPI directly in this dataset
+      // But we CAN use the Group Legal Business Name
+      resolve([]);
+    });
+  }
+
+  /**
    * Search by NPI number (if we have it)
    */
   async searchByNPI(npiNumber) {

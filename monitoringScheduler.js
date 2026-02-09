@@ -476,6 +476,69 @@ class MonitoringScheduler {
         }
       }
 
+      // ═══════════════════════════════════════════════════════════════
+      // PRE-STEP: Client Company Enrichment
+      // Search each unique client name in NPI as organization (NPI-2)
+      // to discover subsidiary/practice names and add to company research
+      // ═══════════════════════════════════════════════════════════════
+      const uniqueClients = [...new Set(hiredCandidates.map(h => h.submission.client_name).filter(Boolean))];
+
+      console.log(`\n══════════════════════════════════════════════════════════════════`);
+      console.log(`  CLIENT COMPANY ENRICHMENT`);
+      console.log(`  Searching ${uniqueClients.length} client(s) in NPI to build parent/subsidiary map`);
+      console.log(`══════════════════════════════════════════════════════════════════\n`);
+
+      for (const clientName of uniqueClients) {
+        try {
+          // Search for the client as an organization in NPI (NPI-2)
+          const orgResults = await this.npi.searchOrganizationByName(clientName);
+
+          if (orgResults.length > 0) {
+            const subsidiaryNames = [];
+
+            for (const org of orgResults) {
+              // Add the org name itself
+              if (org.orgName && !subsidiaryNames.includes(org.orgName)) {
+                subsidiaryNames.push(org.orgName);
+              }
+
+              // Query CMS to find all providers reassigned to this org
+              // and discover other group/practice names under this org
+              if (org.npi) {
+                try {
+                  const cmsOrgs = await this.npi.getOrganizations(org.npi);
+                  // These are orgs the org NPI is reassigned TO (usually itself)
+                  // More useful: search CMS for providers at this org
+                } catch (e) {
+                  // Skip CMS errors
+                }
+              }
+            }
+
+            // Add discovered names to company research as aliases
+            if (subsidiaryNames.length > 0) {
+              console.log(`    ✅ ${clientName}: found ${subsidiaryNames.length} NPI org name(s):`);
+              for (const name of subsidiaryNames) {
+                console.log(`       - ${name}`);
+              }
+
+              // Register these as related companies
+              if (this.companyResearch && typeof this.companyResearch.addRelationship === 'function') {
+                for (const name of subsidiaryNames) {
+                  this.companyResearch.addRelationship(clientName, name);
+                }
+              }
+            }
+          } else {
+            console.log(`    ℹ️ ${clientName}: No NPI organizations found`);
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 300));
+        } catch (e) {
+          console.log(`    ⚠️ Error enriching ${clientName}: ${e.message}`);
+        }
+      }
+
       console.log(`\n══════════════════════════════════════════════════════════════════`);
       console.log(`  CANDIDATE MONITORING`);
       console.log(`  ${hiredCandidates.length} candidates to check (Pipeline → NPI → LinkedIn → Google)`);
