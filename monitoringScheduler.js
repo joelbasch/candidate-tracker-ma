@@ -340,7 +340,37 @@ class MonitoringScheduler {
   }
 
   /**
-   * Check a single candidate through all sources: Pipeline → NPI → LinkedIn → Google
+   * Extract dates from scraped page content near a company/person mention
+   * Looks for patterns like "Updated: Jan 2026", "Posted: Feb 5, 2026", copyright years, etc.
+   */
+  extractPageDates(pageText) {
+    if (!pageText) return null;
+
+    // Common date patterns on web pages
+    const datePatterns = [
+      // "Updated: Jan 15, 2026" or "Last updated January 2026"
+      /(?:updated|modified|published|posted|added|joined|started)[:.\s]*(\w+\.?\s+\d{1,2},?\s+\d{4})/i,
+      /(?:updated|modified|published|posted|added|joined|started)[:.\s]*(\w+\.?\s+\d{4})/i,
+      // "01/15/2026" or "2026-01-15"
+      /(?:updated|modified|published|posted|added|joined|started)[:.\s]*(\d{1,2}\/\d{1,2}\/\d{4})/i,
+      /(?:updated|modified|published|posted|added|joined|started)[:.\s]*(\d{4}-\d{2}-\d{2})/i,
+      // General date near top of page (first 500 chars)
+      /(\w+\s+\d{1,2},?\s+202[4-9])/,
+      /(\d{1,2}\/\d{1,2}\/202[4-9])/,
+      /(202[4-9]-\d{2}-\d{2})/
+    ];
+
+    for (const pattern of datePatterns) {
+      const match = pageText.substring(0, 2000).match(pattern);
+      if (match) return match[1].trim();
+    }
+
+    return null;
+  }
+
+  /**
+   * Check a single candidate through all sources: Pipeline → NPI → Google → LinkedIn
+   * Google runs before LinkedIn to save Netrows credits when Google finds a match
    * Returns per-candidate results
    */
   async checkCandidate(candidate, submission, isHired, results) {
@@ -565,11 +595,66 @@ class MonitoringScheduler {
 
     await new Promise(resolve => setTimeout(resolve, 100));
 
-    // --- LinkedIn ---
-    // Step 1: Google search to find LinkedIn profile URL (free via Serper)
-    // Step 2: Netrows API to get full employment history (if configured)
-    // Step 3: Match all employers (current + past) against client
-    if (this.linkedin && this.linkedin.configured && !this.alertExists(candidate.id, clientName, 'LinkedIn')) {
+    // --- Google Search (Step 3 — runs BEFORE LinkedIn to save Netrows credits) ---
+    // If Google finds the candidate on a client's website/news, no need for LinkedIn
+    if (this.googleSearch && this.googleSearch.apiKey && !this.alertExists(candidate.id, clientName, 'Google Search')) {
+      try {
+        const searchResults = await this.googleSearch.searchCandidate(candidate.full_name);
+
+        if (searchResults && searchResults.allResults && searchResults.allResults.length > 0) {
+          const clientMatch = this.googleSearch.checkResultsForClient(searchResults, clientName, this.companyResearch);
+
+          if (clientMatch && clientMatch.match) {
+            // Try to extract a date from the matching page
+            let pageDate = null;
+            if (clientMatch.sourceUrl && searchResults.pageContents && searchResults.pageContents[clientMatch.sourceUrl]) {
+              pageDate = this.extractPageDates(searchResults.pageContents[clientMatch.sourceUrl]);
+            }
+            // Also check if Serper returned a date for this result
+            if (!pageDate && clientMatch.matchedResult && clientMatch.matchedResult.date) {
+              pageDate = clientMatch.matchedResult.date;
+            }
+
+            let matchDetails = clientMatch.reason;
+            if (pageDate) {
+              matchDetails += ` | Page date: ${pageDate}`;
+              console.log(`    📅 Page date found: ${pageDate}`);
+            }
+
+            console.log(`    🚨 GOOGLE MATCH: ${clientMatch.reason}`);
+
+            this.createAlert({
+              candidate_id: candidate.id,
+              candidate_name: candidate.full_name,
+              client_name: clientName,
+              source: 'Google Search',
+              confidence: 'Medium',
+              match_details: matchDetails,
+              google_source_url: clientMatch.sourceUrl,
+              google_matched_text: clientMatch.matchedText,
+              google_page_date: pageDate || null
+            });
+            results.alertsCreated++;
+            results.googleAlerts++;
+            candidateResults.google = true;
+          } else {
+            console.log(`    ℹ️ Google: No client match in results`);
+          }
+        } else {
+          console.log(`    ℹ️ Google: No search results`);
+        }
+      } catch (error) {
+        console.log(`    ❌ Google error: ${error.message}`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    // --- LinkedIn (Step 4 — deep check, uses Netrows credit) ---
+    // Skip if Google already found a match (save Netrows credits)
+    if (candidateResults.google) {
+      console.log(`    ⏭️ LinkedIn: Skipping — Google already confirmed match (saving Netrows credit)`);
+    } else if (this.linkedin && this.linkedin.configured && !this.alertExists(candidate.id, clientName, 'LinkedIn')) {
       try {
         const profileData = await this.linkedin.findProfile(candidate.full_name);
 
@@ -622,43 +707,6 @@ class MonitoringScheduler {
         }
       } catch (error) {
         console.log(`    ❌ LinkedIn error: ${error.message}`);
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-
-    // --- Google Search ---
-    if (this.googleSearch && this.googleSearch.apiKey && !this.alertExists(candidate.id, clientName, 'Google Search')) {
-      try {
-        const searchResults = await this.googleSearch.searchCandidate(candidate.full_name);
-
-        if (searchResults && searchResults.allResults && searchResults.allResults.length > 0) {
-          const clientMatch = this.googleSearch.checkResultsForClient(searchResults, clientName, this.companyResearch);
-
-          if (clientMatch && clientMatch.match) {
-            console.log(`    🚨 GOOGLE MATCH: ${clientMatch.reason}`);
-
-            this.createAlert({
-              candidate_id: candidate.id,
-              candidate_name: candidate.full_name,
-              client_name: clientName,
-              source: 'Google Search',
-              confidence: 'Medium',
-              match_details: clientMatch.reason,
-              google_source_url: clientMatch.sourceUrl,
-              google_matched_text: clientMatch.matchedText
-            });
-            results.alertsCreated++;
-            results.googleAlerts++;
-            candidateResults.google = true;
-          } else {
-            console.log(`    ℹ️ Google: No client match in results`);
-          }
-        } else {
-          console.log(`    ℹ️ Google: No search results`);
-        }
-      } catch (error) {
-        console.log(`    ❌ Google error: ${error.message}`);
       }
 
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -729,7 +777,7 @@ class MonitoringScheduler {
 
       console.log(`\n══════════════════════════════════════════════════════════════════`);
       console.log(`  CANDIDATE MONITORING`);
-      console.log(`  ${hiredCandidates.length} candidates to check (Pipeline → NPI → LinkedIn → Google)`);
+      console.log(`  ${hiredCandidates.length} candidates to check (Pipeline → NPI → Google → LinkedIn)`);
       console.log(`══════════════════════════════════════════════════════════════════\n`);
 
       for (let i = 0; i < hiredCandidates.length; i++) {

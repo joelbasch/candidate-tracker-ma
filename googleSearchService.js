@@ -324,7 +324,8 @@ class GoogleSearchService {
           link: item.link || '',
           displayLink: item.link ? new URL(item.link).hostname : '',
           source: 'organic',
-          position: item.position
+          position: item.position,
+          date: item.date || null  // Serper sometimes returns publication date
         });
       }
     }
