@@ -210,14 +210,12 @@ class MonitoringScheduler {
             }
           }
 
-          // Step 2: Google search the practice address to find what's there
-          if (!matched && addrCity && addrState && this.googleSearch && this.googleSearch.apiKey) {
-            console.log(`    🔍 Searching address for eye care practices...`);
+          // Step 2: Google search the practice address to see what's there
+          if (!matched && addrLine && addrCity && addrState && this.googleSearch && this.googleSearch.apiKey) {
+            console.log(`    🔍 Searching NPI address to see what's there...`);
 
-            // Build address search query
-            const addressQuery = addrLine
-              ? `"${addrLine}" "${addrCity}" ${addrState} optometrist eye care`
-              : `optometrist eye care "${addrCity}" ${addrState} "${relevantProvider.fullName}"`;
+            // Just search the address - don't add keywords, let Google show what's at this location
+            const addressQuery = `"${addrLine}" "${addrCity}" ${addrState}`;
 
             const searchData = await this.googleSearch.makeRequest(addressQuery, 10);
 
