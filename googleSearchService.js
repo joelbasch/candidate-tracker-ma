@@ -401,18 +401,31 @@ class GoogleSearchService {
     if (companyResearch && typeof companyResearch.getAllRelationships === 'function') {
       try {
         const allRelationships = companyResearch.getAllRelationships();
+        // FIX: getAllRelationships() returns { manual: [...], cached: [...] }, not an array
+        let relEntries = [];
         if (Array.isArray(allRelationships)) {
-          for (const rel of allRelationships) {
-            const normParent = normalizeForSearch(rel.parent);
-            // Check if client is this parent or one of its subsidiaries
-            const isRelevant = normParent === normClient || 
-              (rel.subsidiaries || []).some(s => normalizeForSearch(s) === normClient);
-            
-            if (isRelevant) {
-              namesToCheck.push(normParent);
-              for (const sub of (rel.subsidiaries || [])) {
-                namesToCheck.push(normalizeForSearch(sub));
-              }
+          relEntries = allRelationships;
+        } else if (allRelationships && typeof allRelationships === 'object') {
+          const manual = allRelationships.manual || [];
+          const cached = allRelationships.cached || [];
+          if (Array.isArray(manual)) relEntries.push(...manual);
+          if (Array.isArray(cached)) relEntries.push(...cached);
+        }
+
+        for (const rel of relEntries) {
+          if (!rel) continue;
+          const parentName = rel.parent || rel.parentCompany || '';
+          const subs = rel.subsidiaries || rel.aliases || rel.children || [];
+          const normParent = normalizeForSearch(parentName);
+          const subsArray = Array.isArray(subs) ? subs : [];
+
+          const isRelevant = normParent === normClient ||
+            subsArray.some(s => normalizeForSearch(s) === normClient);
+
+          if (isRelevant) {
+            namesToCheck.push(normParent);
+            for (const sub of subsArray) {
+              namesToCheck.push(normalizeForSearch(sub));
             }
           }
         }
