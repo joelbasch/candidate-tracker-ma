@@ -553,6 +553,27 @@ app.delete('/api/candidates/:id', (req, res) => {
   }
 });
 
+// Clear all data (candidates, submissions, alerts) for fresh re-upload
+app.post('/api/clear-all', (req, res) => {
+  try {
+    const counts = {
+      candidates: (db.data.candidates || []).length,
+      submissions: (db.data.submissions || []).length,
+      alerts: (db.data.alerts || []).length
+    };
+
+    db.data.candidates = [];
+    db.data.submissions = [];
+    db.data.alerts = [];
+    db.saveDatabase();
+
+    console.log(`🗑️ Cleared all data: ${counts.candidates} candidates, ${counts.submissions} submissions, ${counts.alerts} alerts`);
+    res.json({ success: true, cleared: counts });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Trigger Loxo sync
 app.post('/api/sync/loxo', async (req, res) => {
   try {
