@@ -133,6 +133,213 @@ class MonitoringScheduler {
   }
 
   /**
+   * Enrich a client company by scraping their website for practice names and locations
+   * 1) Google search "{client name} our practices locations"
+   * 2) Find the client's website
+   * 3) Scrape the practices/locations page for subsidiary names
+   * 4) For each subsidiary, try to scrape their locations page
+   * 5) Register all names as aliases in companyResearch
+   */
+  async enrichClientFromWebsite(clientName) {
+    console.log(`  🌐 ${clientName}:`);
+
+    // Step 1: Google search for the client's practices/locations page
+    const queries = [
+      `"${clientName}" our practices locations`,
+      `"${clientName}" locations offices`
+    ];
+
+    let practicesPageUrl = null;
+    let clientWebsite = null;
+    let allSearchResults = [];
+
+    for (const query of queries) {
+      try {
+        const searchData = await this.googleSearch.makeRequest(query, 10);
+        if (searchData && searchData.organic) {
+          for (const r of searchData.organic) {
+            allSearchResults.push(r);
+            const link = (r.link || '').toLowerCase();
+            const title = (r.title || '').toLowerCase();
+            const snippet = (r.snippet || '').toLowerCase();
+
+            // Look for practices/locations pages
+            if (link.includes('practice') || link.includes('location') ||
+                link.includes('offices') || link.includes('our-brands') ||
+                title.includes('practice') || title.includes('location') ||
+                title.includes('offices') || snippet.includes('our practices')) {
+              if (!practicesPageUrl) {
+                practicesPageUrl = r.link;
+              }
+            }
+
+            // Capture the main website domain
+            if (!clientWebsite && r.link) {
+              try {
+                const url = new URL(r.link);
+                const host = url.hostname.replace('www.', '');
+                const clientNorm = clientName.toLowerCase().replace(/[^a-z0-9]/g, '');
+                const hostNorm = host.replace(/[^a-z0-9]/g, '');
+                if (hostNorm.includes(clientNorm) || clientNorm.includes(hostNorm.split('.')[0])) {
+                  clientWebsite = `${url.protocol}//${url.hostname}`;
+                }
+              } catch (e) {}
+            }
+          }
+        }
+      } catch (e) {}
+
+      await new Promise(resolve => setTimeout(resolve, 300));
+      if (practicesPageUrl) break;
+    }
+
+    if (!practicesPageUrl && !clientWebsite) {
+      console.log(`    ℹ️ Could not find website for ${clientName}`);
+      return;
+    }
+
+    // Step 2: Scrape the practices/locations page
+    const urlToScrape = practicesPageUrl || `${clientWebsite}/locations` || `${clientWebsite}/our-practices`;
+    console.log(`    📄 Scraping: ${urlToScrape}`);
+
+    let practiceNames = [];
+
+    try {
+      const pageText = await this.googleSearch.fetchPageContent(urlToScrape);
+      if (pageText && pageText.length > 100) {
+        console.log(`    ✅ Got ${pageText.length} chars from practices page`);
+
+        // Extract practice/company names from the page
+        // Look for patterns like business names that appear multiple times
+        practiceNames = this.extractPracticeNames(pageText, clientName);
+
+        if (practiceNames.length > 0) {
+          console.log(`    🏥 Found ${practiceNames.length} practice name(s):`);
+          for (const name of practiceNames.slice(0, 20)) {
+            console.log(`       - ${name}`);
+          }
+          if (practiceNames.length > 20) {
+            console.log(`       ... and ${practiceNames.length - 20} more`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`    ⚠️ Could not scrape practices page: ${e.message}`);
+    }
+
+    // Step 3: If we found practice names, try to get their locations too
+    // For each practice with its own website, scrape for addresses
+    // (limit to first 5 to avoid too many requests)
+    const practiceLocations = [];
+
+    for (const practiceName of practiceNames.slice(0, 5)) {
+      // Google search for this practice's locations
+      try {
+        const practiceSearch = await this.googleSearch.makeRequest(`"${practiceName}" locations optometrist`, 5);
+        if (practiceSearch && practiceSearch.organic && practiceSearch.organic[0]) {
+          const practiceUrl = practiceSearch.organic[0].link;
+          if (practiceUrl && (practiceUrl.includes('location') || practiceUrl.includes(practiceName.toLowerCase().replace(/\s+/g, '')))) {
+            const locPage = await this.googleSearch.fetchPageContent(practiceUrl);
+            if (locPage && locPage.length > 100) {
+              // Extract addresses from the locations page
+              const addresses = this.extractAddresses(locPage);
+              if (addresses.length > 0) {
+                console.log(`    📍 ${practiceName}: ${addresses.length} location(s)`);
+                practiceLocations.push({ name: practiceName, addresses, url: practiceUrl });
+              }
+            }
+          }
+        }
+      } catch (e) {}
+
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+
+    // Step 4: Register all discovered names as aliases for this client
+    const allNames = [...practiceNames];
+    for (const loc of practiceLocations) {
+      if (!allNames.includes(loc.name)) allNames.push(loc.name);
+    }
+
+    if (allNames.length > 0 && this.companyResearch && typeof this.companyResearch.addRelationship === 'function') {
+      for (const name of allNames) {
+        this.companyResearch.addRelationship(clientName, name);
+      }
+      console.log(`    ✅ Registered ${allNames.length} practice name(s) as aliases for "${clientName}"`);
+    }
+
+    // Store practice locations for address matching during NPI check
+    if (!this.clientLocations) this.clientLocations = {};
+    this.clientLocations[clientName] = practiceLocations;
+  }
+
+  /**
+   * Extract practice/company names from a scraped practices page
+   * Looks for repeated patterns that look like business names
+   */
+  extractPracticeNames(pageText, parentName) {
+    const names = new Set();
+    const text = pageText || '';
+
+    // Common patterns for practice names on aggregator pages:
+    // - Lines that end with common suffixes like "Eye Care", "Vision", "Optical", "Eyecare"
+    // - Names that appear as headers or list items
+    const patterns = [
+      /([A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){0,4}\s+(?:Eye\s*Care|Eyecare|Vision|Optical|Optometry|Ophthalmology|Eye\s+(?:Center|Clinic|Associates|Group|Institute|Specialists)))/g,
+      /([A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){0,3}\s+(?:Family\s+Eye|Advanced\s+Eye|Premier\s+Eye|Complete\s+Eye)(?:\s+\w+)?)/g
+    ];
+
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const name = match[1].trim();
+        // Skip if it's just the parent company name or too short
+        if (name.length > 5 && name.toLowerCase() !== parentName.toLowerCase()) {
+          names.add(name);
+        }
+      }
+    }
+
+    // Also look for lines between common separators that look like practice names
+    const lines = text.split(/[|\n•·–—]/).map(l => l.trim()).filter(l => l.length > 5 && l.length < 60);
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+      if ((lower.includes('eye') || lower.includes('vision') || lower.includes('optical') ||
+           lower.includes('optom') || lower.includes('ophthalm')) &&
+          /^[A-Z]/.test(line) && !lower.includes('click') && !lower.includes('learn more') &&
+          !lower.includes('http') && !lower.includes('cookie')) {
+        if (line.toLowerCase() !== parentName.toLowerCase()) {
+          names.add(line.replace(/[,.]$/, '').trim());
+        }
+      }
+    }
+
+    return [...names];
+  }
+
+  /**
+   * Extract addresses from a locations page
+   * Looks for US address patterns (street, city, state zip)
+   */
+  extractAddresses(pageText) {
+    const addresses = [];
+    const text = pageText || '';
+
+    // US address pattern: number + street, city, ST ZIP
+    const addrPattern = /(\d+\s+[A-Za-z0-9\s\.\-]+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Pkwy|Parkway|Hwy|Highway|Cir|Circle|Pl|Place)[.\s,]+[A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5})/gi;
+
+    let match;
+    while ((match = addrPattern.exec(text)) !== null) {
+      const addr = match[1].trim();
+      if (!addresses.includes(addr) && addr.length < 120) {
+        addresses.push(addr);
+      }
+    }
+
+    return addresses;
+  }
+
+  /**
    * Check a single candidate through all sources: Pipeline → NPI → LinkedIn → Google
    * Returns per-candidate results
    */
@@ -478,65 +685,27 @@ class MonitoringScheduler {
 
       // ═══════════════════════════════════════════════════════════════
       // PRE-STEP: Client Company Enrichment
-      // Search each unique client name in NPI as organization (NPI-2)
-      // to discover subsidiary/practice names and add to company research
+      // Google search each client → find their website → scrape practices/locations pages
+      // to build a database of practice names and addresses for matching
       // ═══════════════════════════════════════════════════════════════
       const uniqueClients = [...new Set(hiredCandidates.map(h => h.submission.client_name).filter(Boolean))];
 
       console.log(`\n══════════════════════════════════════════════════════════════════`);
       console.log(`  CLIENT COMPANY ENRICHMENT`);
-      console.log(`  Searching ${uniqueClients.length} client(s) in NPI to build parent/subsidiary map`);
+      console.log(`  Scraping ${uniqueClients.length} client website(s) for practice names & locations`);
       console.log(`══════════════════════════════════════════════════════════════════\n`);
 
-      for (const clientName of uniqueClients) {
-        try {
-          // Search for the client as an organization in NPI (NPI-2)
-          const orgResults = await this.npi.searchOrganizationByName(clientName);
-
-          if (orgResults.length > 0) {
-            const subsidiaryNames = [];
-
-            for (const org of orgResults) {
-              // Add the org name itself
-              if (org.orgName && !subsidiaryNames.includes(org.orgName)) {
-                subsidiaryNames.push(org.orgName);
-              }
-
-              // Query CMS to find all providers reassigned to this org
-              // and discover other group/practice names under this org
-              if (org.npi) {
-                try {
-                  const cmsOrgs = await this.npi.getOrganizations(org.npi);
-                  // These are orgs the org NPI is reassigned TO (usually itself)
-                  // More useful: search CMS for providers at this org
-                } catch (e) {
-                  // Skip CMS errors
-                }
-              }
-            }
-
-            // Add discovered names to company research as aliases
-            if (subsidiaryNames.length > 0) {
-              console.log(`    ✅ ${clientName}: found ${subsidiaryNames.length} NPI org name(s):`);
-              for (const name of subsidiaryNames) {
-                console.log(`       - ${name}`);
-              }
-
-              // Register these as related companies
-              if (this.companyResearch && typeof this.companyResearch.addRelationship === 'function') {
-                for (const name of subsidiaryNames) {
-                  this.companyResearch.addRelationship(clientName, name);
-                }
-              }
-            }
-          } else {
-            console.log(`    ℹ️ ${clientName}: No NPI organizations found`);
+      if (this.googleSearch && this.googleSearch.apiKey) {
+        for (const clientName of uniqueClients) {
+          try {
+            await this.enrichClientFromWebsite(clientName);
+            await new Promise(resolve => setTimeout(resolve, 500));
+          } catch (e) {
+            console.log(`    ⚠️ Error enriching ${clientName}: ${e.message}`);
           }
-
-          await new Promise(resolve => setTimeout(resolve, 300));
-        } catch (e) {
-          console.log(`    ⚠️ Error enriching ${clientName}: ${e.message}`);
         }
+      } else {
+        console.log(`  ⚠️ Skipping enrichment - no Google Search API key`);
       }
 
       console.log(`\n══════════════════════════════════════════════════════════════════`);
