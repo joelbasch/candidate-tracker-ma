@@ -339,6 +339,54 @@ class MonitoringScheduler {
       console.log(`    ⚠️ Could not scrape practices page: ${e.message}`);
     }
 
+    // Step 2c: If scraping found zero practice names AND client is a parent company (*),
+    // search Google for known subsidiaries/brands directly from search snippets
+    if (practiceNames.length === 0 && clientName.includes('*')) {
+      const cleanName = clientName.replace(/[*]/g, '').trim();
+      console.log(`    🔍 Parent company with no scraped practices — searching Google for subsidiaries...`);
+      try {
+        const subQuery = `"${cleanName}" practices OR brands OR subsidiaries optometry`;
+        const subSearch = await this.googleSearch.makeRequest(subQuery, 10);
+        if (subSearch && subSearch.organic) {
+          const snippetNames = new Set();
+          for (const r of subSearch.organic) {
+            const text = (r.title || '') + ' ' + (r.snippet || '');
+            // Extract practice names from snippets using same patterns
+            const extracted = this.extractPracticeNames(text, clientName);
+            for (const name of extracted) {
+              snippetNames.add(name);
+            }
+            // Also look for "X Eye Care", "X Vision Center" etc. in snippets directly
+            const quickPatterns = [
+              /([A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){0,3}\s+(?:Eye\s*Care|Vision|Optical|Optometry|Eye\s+(?:Center|Clinic|Associates|Group)))/g
+            ];
+            for (const pat of quickPatterns) {
+              let m;
+              while ((m = pat.exec(text)) !== null) {
+                const found = m[1].trim();
+                const foundLower = found.toLowerCase();
+                if (found.length > 5 && !foundLower.includes(cleanName.toLowerCase()) && found.split(/\s+/).length >= 2 && found.split(/\s+/).length <= 5) {
+                  snippetNames.add(found);
+                }
+              }
+            }
+          }
+          if (snippetNames.size > 0) {
+            practiceNames = [...snippetNames];
+            console.log(`    🏥 Found ${practiceNames.length} subsidiary name(s) from Google:`);
+            for (const name of practiceNames.slice(0, 20)) {
+              console.log(`       - ${name}`);
+            }
+            if (practiceNames.length > 20) {
+              console.log(`       ... and ${practiceNames.length - 20} more`);
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`    ⚠️ Subsidiary search error: ${e.message}`);
+      }
+    }
+
     // Step 3: If we found practice names, try to get their locations too
     // For each practice with its own website, scrape for addresses
     // (limit to first 5 to avoid too many requests)
@@ -634,9 +682,11 @@ class MonitoringScheduler {
             }
           }
 
-          // Step 2b: If no direct match and client is a parent company (*),
-          // Google search to check if CMS orgs are subsidiaries of the client
-          if (!matched && clientName.includes('*') && allOrgNames.length > 0 && this.googleSearch && this.googleSearch.apiKey) {
+          // Step 2b: If no direct match and we have CMS orgs,
+          // Google search to check if CMS orgs are subsidiaries/related to the client
+          // This catches parent companies (marked with *) and any client whose website
+          // couldn't be scraped for practice names
+          if (!matched && allOrgNames.length > 0 && this.googleSearch && this.googleSearch.apiKey) {
             const cleanClient = clientName.replace(/\([^)]*\)/g, '').replace(/\s*-\s*[A-Z]{2,6}$/i, '').replace(/[*&]/g, '').trim();
             for (const orgName of allOrgNames) {
               if (matched) break;
