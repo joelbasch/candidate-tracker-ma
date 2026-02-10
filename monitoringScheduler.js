@@ -134,72 +134,63 @@ class MonitoringScheduler {
 
   /**
    * Enrich a client company by scraping their website for practice names and locations
-   * 1) Google search "{client name} our practices locations"
-   * 2) Find the client's website
-   * 3) Scrape the practices/locations page for subsidiary names
-   * 4) For each subsidiary, try to scrape their locations page
-   * 5) Register all names as aliases in companyResearch
+   * 1) Google search "{client name}" to find their official website
+   * 2) Only scrape pages from that domain (not third-party sites)
+   * 3) Extract practice/subsidiary names
+   * 4) Register all names as aliases in companyResearch
    */
   async enrichClientFromWebsite(clientName) {
     console.log(`  🌐 ${clientName}:`);
 
-    // Step 1: Google search for the client's practices/locations page
-    const queries = [
-      `"${clientName}" our practices locations`,
-      `"${clientName}" locations offices`
-    ];
+    // Step 1: Find the client's OFFICIAL website first
+    const searchData = await this.googleSearch.makeRequest(`"${clientName}" official site`, 10);
 
-    let practicesPageUrl = null;
     let clientWebsite = null;
-    let allSearchResults = [];
+    let clientDomain = null;
 
-    for (const query of queries) {
-      try {
-        const searchData = await this.googleSearch.makeRequest(query, 10);
-        if (searchData && searchData.organic) {
-          for (const r of searchData.organic) {
-            allSearchResults.push(r);
-            const link = (r.link || '').toLowerCase();
-            const title = (r.title || '').toLowerCase();
-            const snippet = (r.snippet || '').toLowerCase();
+    if (searchData && searchData.organic) {
+      for (const r of searchData.organic) {
+        if (!r.link) continue;
+        try {
+          const url = new URL(r.link);
+          const host = url.hostname.replace('www.', '').toLowerCase();
+          const clientNorm = clientName.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const hostNorm = host.replace(/[^a-z0-9]/g, '').replace(/com$/, '');
 
-            // Look for practices/locations pages
-            if (link.includes('practice') || link.includes('location') ||
-                link.includes('offices') || link.includes('our-brands') ||
-                title.includes('practice') || title.includes('location') ||
-                title.includes('offices') || snippet.includes('our practices')) {
-              if (!practicesPageUrl) {
-                practicesPageUrl = r.link;
-              }
-            }
-
-            // Capture the main website domain
-            if (!clientWebsite && r.link) {
-              try {
-                const url = new URL(r.link);
-                const host = url.hostname.replace('www.', '');
-                const clientNorm = clientName.toLowerCase().replace(/[^a-z0-9]/g, '');
-                const hostNorm = host.replace(/[^a-z0-9]/g, '');
-                if (hostNorm.includes(clientNorm) || clientNorm.includes(hostNorm.split('.')[0])) {
-                  clientWebsite = `${url.protocol}//${url.hostname}`;
-                }
-              } catch (e) {}
-            }
+          // Domain must contain the client name (or vice versa) to be their site
+          if (hostNorm.includes(clientNorm) || clientNorm.includes(hostNorm.split('.')[0])) {
+            clientWebsite = `${url.protocol}//${url.hostname}`;
+            clientDomain = host;
+            break;
           }
-        }
-      } catch (e) {}
-
-      await new Promise(resolve => setTimeout(resolve, 300));
-      if (practicesPageUrl) break;
+        } catch (e) {}
+      }
     }
 
-    if (!practicesPageUrl && !clientWebsite) {
-      console.log(`    ℹ️ Could not find website for ${clientName}`);
+    if (!clientWebsite) {
+      console.log(`    ℹ️ Could not find official website for ${clientName}`);
       return;
     }
 
-    // Step 2: Scrape the practices/locations page
-    const urlToScrape = practicesPageUrl || `${clientWebsite}/locations` || `${clientWebsite}/our-practices`;
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Step 2: Search for locations/practices page ON THEIR OWN DOMAIN
+    let practicesPageUrl = null;
+    const locSearch = await this.googleSearch.makeRequest(`site:${clientDomain} locations OR practices OR offices`, 5);
+
+    if (locSearch && locSearch.organic) {
+      for (const r of locSearch.organic) {
+        const link = (r.link || '').toLowerCase();
+        if (link.includes('location') || link.includes('practice') ||
+            link.includes('office') || link.includes('our-brands')) {
+          practicesPageUrl = r.link;
+          break;
+        }
+      }
+    }
+
+    // Fallback: try common location page URLs on their domain
+    const urlToScrape = practicesPageUrl || `${clientWebsite}/locations`;
     console.log(`    📄 Scraping: ${urlToScrape}`);
 
     let practiceNames = [];
@@ -314,7 +305,22 @@ class MonitoringScheduler {
       }
     }
 
-    return [...names];
+    // Filter out junk: names with too many words, or that contain nav/article keywords
+    const junkWords = ['report', 'summit', 'corner', 'honor', 'moves', 'career', 'newsroom',
+      'subscribe', 'newsletter', 'copyright', 'privacy', 'terms', 'login', 'sign in',
+      'search', 'menu', 'navigation', 'footer', 'header', 'sidebar', 'article', 'blog',
+      'watch', 'video', 'podcast', 'webinar', 'event', 'conference'];
+    const filtered = [...names].filter(name => {
+      const lower = name.toLowerCase();
+      const words = name.split(/\s+/);
+      // Max 6 words for a practice name
+      if (words.length > 6) return false;
+      // Skip if it contains junk keywords
+      if (junkWords.some(j => lower.includes(j))) return false;
+      return true;
+    });
+
+    return filtered;
   }
 
   /**

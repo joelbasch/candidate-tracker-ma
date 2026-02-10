@@ -572,7 +572,12 @@ class LinkedInService {
     console.log(`    ✅ Found LinkedIn: ${bestProfile.url}`);
 
     // --- STEP 2: If Netrows is configured, get FULL profile data ---
-    if (this.netrowsConfigured) {
+    // Only use Netrows credits when we have reasonable confidence this is the right person
+    // (score >= 50 means at least US location + some signal, or optometrist confirmed)
+    if (this.netrowsConfigured && best.score < 50) {
+      console.log(`    ⏭️ Skipping Netrows: low confidence (score ${best.score}), saving credit`);
+    }
+    if (this.netrowsConfigured && best.score >= 50) {
       const username = this.extractUsername(bestProfile.url);
       if (username) {
         console.log(`    📡 Fetching full profile via Netrows (${username})...`);
