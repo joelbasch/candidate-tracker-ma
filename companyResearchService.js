@@ -206,22 +206,53 @@ class CompanyResearchService {
     }
 
     // Check for common significant words (at least 5 chars)
-    // Exclude generic industry words that would cause false positives in eye care
+    // Exclude generic industry words and geographic names that cause false positives
     const stopWords = new Set([
+      // Industry terms
       'vision', 'optical', 'eyecare', 'associates', 'partners', 'group',
       'center', 'centre', 'clinic', 'practice', 'health', 'healthcare',
       'medical', 'professional', 'services', 'management', 'national',
-      'american', 'family', 'premier', 'advanced', 'specialty', 'comprehensive'
+      'american', 'family', 'premier', 'advanced', 'specialty', 'comprehensive',
+      // US state names (5+ chars)
+      'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado',
+      'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
+      'illinois', 'indiana', 'kansas', 'kentucky', 'louisiana', 'maine',
+      'maryland', 'massachusetts', 'michigan', 'minnesota', 'mississippi',
+      'missouri', 'montana', 'nebraska', 'nevada', 'jersey', 'mexico',
+      'north', 'south', 'carolina', 'dakota', 'oklahoma', 'oregon',
+      'pennsylvania', 'rhode', 'island', 'tennessee', 'texas', 'vermont',
+      'virginia', 'washington', 'wisconsin', 'wyoming',
+      // Common US city names that appear in company names
+      'columbia', 'charleston', 'augusta', 'jackson', 'richmond', 'springfield',
+      'franklin', 'clinton', 'madison', 'lincoln', 'chester', 'portland',
+      'manchester', 'greenville', 'birmingham', 'memphis', 'nashville',
+      'charlotte', 'raleigh', 'durham', 'austin', 'houston', 'phoenix',
+      'denver', 'seattle', 'boston', 'atlanta', 'dallas', 'chicago',
+      'detroit', 'cleveland', 'pittsburgh', 'tampa', 'orlando', 'miami',
+      // Common generic words
+      'super', 'store', 'market', 'plaza', 'place', 'point', 'crossing',
+      'village', 'square', 'boulevard', 'street', 'avenue', 'drive',
+      'suite', 'building', 'tower', 'floor', 'office', 'retail',
+      'walmart', 'target', 'costco', 'kroger', 'walgreens'
     ]);
     const words1 = norm1.split(' ').filter(w => w.length >= 5 && !stopWords.has(w));
     const words2 = norm2.split(' ').filter(w => w.length >= 5 && !stopWords.has(w));
-    
+
+    // Require at least 2 matching words, or 1 match if it's long (8+ chars) and specific
+    const matches = [];
     for (const w1 of words1) {
       for (const w2 of words2) {
         if (w1 === w2) {
-          return { match: true, reason: `Common word: "${w1}"` };
+          matches.push(w1);
         }
       }
+    }
+
+    if (matches.length >= 2) {
+      return { match: true, reason: `Common words: "${matches.join('", "')}"` };
+    }
+    if (matches.length === 1 && matches[0].length >= 8) {
+      return { match: true, reason: `Common word: "${matches[0]}"` };
     }
 
     return { match: false, reason: null };

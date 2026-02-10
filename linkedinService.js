@@ -572,10 +572,10 @@ class LinkedInService {
     console.log(`    ✅ Found LinkedIn: ${bestProfile.url}`);
 
     // --- STEP 2: If Netrows is configured, get FULL profile data ---
-    // Only use Netrows credits when we have optometrist signal OR high confidence
-    // Require either: optometrist keywords in title/snippet, OR score >= 70 (US + optometrist + name match)
+    // Only use Netrows credits when profile shows optometrist signal
+    // This prevents wasting credits on delivery drivers, customer service reps, etc.
     const hasOptSignal = this.isOptometristProfile(bestProfile.title, bestProfile.snippet);
-    const netrowsWorthy = hasOptSignal || best.score >= 70;
+    const netrowsWorthy = hasOptSignal;
 
     if (this.netrowsConfigured && !netrowsWorthy) {
       console.log(`    ⏭️ Skipping Netrows: no optometrist signal (score ${best.score}), saving credit`);
