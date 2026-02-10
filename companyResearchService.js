@@ -204,9 +204,30 @@ class CompanyResearchService {
     }
 
     // Check for common significant words (at least 5 chars)
-    const words1 = norm1.split(' ').filter(w => w.length >= 5);
-    const words2 = norm2.split(' ').filter(w => w.length >= 5);
-    
+    // Exclude generic industry/business terms that cause false positives
+    const stopwords = new Set([
+      // Eye care / medical industry terms
+      'vision', 'eyecare', 'optical', 'optometry', 'ophthalmology', 'optics',
+      'medical', 'health', 'healthcare', 'dental', 'clinic', 'clinical',
+      'center', 'centre', 'hospital', 'wellness', 'therapy', 'rehab',
+      'surgery', 'surgical', 'physician', 'physicians', 'doctor', 'doctors',
+      // Generic business terms
+      'group', 'associates', 'services', 'partners', 'partnership', 'practice',
+      'practices', 'company', 'enterprise', 'enterprises', 'solutions',
+      'management', 'consulting', 'international', 'holdings', 'incorporated',
+      // Common adjectives used in company names
+      'family', 'advanced', 'premier', 'professional', 'professionals',
+      'national', 'american', 'united', 'first', 'general', 'community',
+      'regional', 'modern', 'comprehensive', 'complete', 'total', 'superior',
+      'elite', 'precision', 'coastal', 'pacific', 'atlantic', 'midwest',
+      // Directional/geographic
+      'north', 'south', 'east', 'west', 'central', 'valley', 'mountain',
+      'urban', 'metro', 'suburban', 'county', 'state'
+    ]);
+
+    const words1 = norm1.split(' ').filter(w => w.length >= 5 && !stopwords.has(w));
+    const words2 = norm2.split(' ').filter(w => w.length >= 5 && !stopwords.has(w));
+
     for (const w1 of words1) {
       for (const w2 of words2) {
         if (w1 === w2) {

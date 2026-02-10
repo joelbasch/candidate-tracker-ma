@@ -108,12 +108,24 @@ class LinkedInService {
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
           if (res.statusCode !== 200) {
-            console.log(`    ⚠️ Netrows API returned ${res.statusCode}`);
+            console.log(`    ⚠️ Netrows API returned ${res.statusCode}: ${data.substring(0, 200)}`);
             resolve(null);
             return;
           }
           try {
             const profile = JSON.parse(data);
+            // Log raw response structure for debugging
+            const topKeys = Object.keys(profile);
+            console.log(`    📦 Netrows raw keys: ${topKeys.join(', ')}`);
+            // Log any array/object fields that might contain employment data
+            for (const key of topKeys) {
+              const val = profile[key];
+              if (Array.isArray(val)) {
+                console.log(`    📦 ${key}: Array[${val.length}]${val.length > 0 ? ' → first: ' + JSON.stringify(val[0]).substring(0, 150) : ''}`);
+              } else if (val && typeof val === 'object') {
+                console.log(`    📦 ${key}: Object{${Object.keys(val).join(', ')}}`);
+              }
+            }
             resolve(profile);
           } catch (e) {
             console.log(`    ⚠️ Netrows API parse error: ${e.message}`);
@@ -441,13 +453,24 @@ class LinkedInService {
 
     console.log(`    🔍 LinkedIn search for: "${cleanedName}"`);
 
+    // Generate name variants (with and without middle name)
+    const nameParts = cleanedName.split(/\s+/);
+    const nameVariants = [cleanedName];
+    if (nameParts.length >= 3) {
+      // Try first + last (drop middle names)
+      const shortName = `${nameParts[0]} ${nameParts[nameParts.length - 1]}`;
+      nameVariants.push(shortName);
+      console.log(`    🔍 Also trying without middle name: "${shortName}"`);
+    }
+
     // Collect ALL candidate profiles across multiple queries
     const allCandidates = new Map(); // url → { result, score }
 
-    const queries = [
-      `"${cleanedName}" site:linkedin.com/in optometrist`,
-      `"${cleanedName}" site:linkedin.com/in OD`
-    ];
+    const queries = [];
+    for (const name of nameVariants) {
+      queries.push(`"${name}" site:linkedin.com/in optometrist`);
+      queries.push(`"${name}" site:linkedin.com/in OD`);
+    }
 
     for (const query of queries) {
       const data = await this.makeRequest(query, 10);
