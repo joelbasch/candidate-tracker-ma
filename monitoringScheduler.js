@@ -142,6 +142,19 @@ class MonitoringScheduler {
   async enrichClientFromWebsite(clientName) {
     console.log(`  🌐 ${clientName}:`);
 
+    // Check cache first — skip the whole Google search if we already know this client
+    if (!this._clientWebsiteCache) this._clientWebsiteCache = {};
+    if (this._clientWebsiteCache[clientName]) {
+      const cached = this._clientWebsiteCache[clientName];
+      if (cached.skip) {
+        console.log(`    ℹ️ Skipping (cached: no suitable website found)`);
+        return;
+      }
+      console.log(`    🌐 Official website: ${cached.website} (cached)`);
+      // Jump straight to step 2 with cached values
+      return this._enrichFromVerifiedSite(clientName, cached.website, cached.domain);
+    }
+
     // Blacklist: never treat these as the client's official website
     const blacklistedDomains = new Set([
       'indeed', 'glassdoor', 'linkedin', 'facebook', 'twitter', 'instagram',
@@ -152,6 +165,15 @@ class MonitoringScheduler {
       'visionmonday', 'reviewofoptometry', 'aoa', 'allaboutvision',
       'eyesoneyecare', 'optometrytimes', 'invisionmag'
     ]);
+
+    // Industry keywords — the website must mention at least one to be an eye care company
+    const industryKeywords = [
+      'optometry', 'optometrist', 'optometric', 'ophthalmology', 'ophthalmologist',
+      'eye care', 'eyecare', 'eye doctor', 'eye exam', 'eye health',
+      'vision care', 'optical', 'glasses', 'contact lens', 'contacts',
+      'retina', 'cataract', 'lasik', 'glaucoma', 'cornea',
+      'od ', ' od,', ' od.', 'o.d.', 'doctor of optometry'
+    ];
 
     // Step 1: Find the client's OFFICIAL website first
     // Include "optometry" in search to bias toward the right industry
@@ -176,27 +198,57 @@ class MonitoringScheduler {
           }
 
           // Domain must meaningfully match the client name
-          // Either: domain contains the full client name, or client name contains the full domain
-          // For reverse match (client contains domain), require domain to be at least 5 chars
-          // to prevent short domains like "svs.com" matching "SVS Vision Optometry"
           const domainMatch = hostNorm.includes(clientNorm) ||
             (hostNorm.length >= 5 && clientNorm.includes(hostNorm));
 
-          if (domainMatch) {
-            clientWebsite = `${url.protocol}//${url.hostname}`;
-            clientDomain = host;
-            console.log(`    🌐 Official website: ${clientWebsite}`);
-            break;
+          if (!domainMatch) continue;
+
+          // VERIFY: Check snippet/title for industry keywords before accepting
+          const snippetAndTitle = ((r.snippet || '') + ' ' + (r.title || '')).toLowerCase();
+          const hasIndustrySignal = industryKeywords.some(kw => snippetAndTitle.includes(kw));
+
+          if (!hasIndustrySignal) {
+            // Domain matches but no eye care keywords — fetch homepage to verify
+            console.log(`    🔍 Checking ${host} for eye care content...`);
+            try {
+              const pageContent = await this.googleSearch.fetchPageContent(`${url.protocol}//${url.hostname}`);
+              const pageLower = (pageContent || '').toLowerCase();
+              const pageHasIndustry = industryKeywords.some(kw => pageLower.includes(kw));
+              if (!pageHasIndustry) {
+                console.log(`    ❌ ${host} is not an eye care site, skipping`);
+                continue; // Try next result
+              }
+            } catch (e) {
+              console.log(`    ⚠️ Could not verify ${host}, skipping`);
+              continue;
+            }
           }
+
+          clientWebsite = `${url.protocol}//${url.hostname}`;
+          clientDomain = host;
+          console.log(`    🌐 Official website: ${clientWebsite}`);
+          break;
         } catch (e) {}
       }
     }
 
     if (!clientWebsite) {
       console.log(`    ℹ️ Could not find official website for ${clientName}`);
+      this._clientWebsiteCache[clientName] = { skip: true };
       return;
     }
 
+    // Cache the verified website for future candidates with same client
+    this._clientWebsiteCache[clientName] = { website: clientWebsite, domain: clientDomain };
+
+    return this._enrichFromVerifiedSite(clientName, clientWebsite, clientDomain);
+  }
+
+  /**
+   * Step 2+: Scrape a verified client website for practice names/locations
+   * Called directly for cached sites (skip Google search), or after website verification
+   */
+  async _enrichFromVerifiedSite(clientName, clientWebsite, clientDomain) {
     await new Promise(resolve => setTimeout(resolve, 300));
 
     // Step 2: Search for locations/practices page ON THEIR OWN DOMAIN
@@ -815,6 +867,7 @@ class MonitoringScheduler {
 
       // Client enrichment runs per-candidate (cached after first lookup)
       this._enrichedClients = new Set();
+      this._clientWebsiteCache = {};
 
       console.log(`\n══════════════════════════════════════════════════════════════════`);
       console.log(`  CANDIDATE MONITORING`);
