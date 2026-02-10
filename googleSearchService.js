@@ -390,7 +390,12 @@ class GoogleSearchService {
 
     const normalizeForSearch = (str) => {
       if (!str) return '';
-      return str.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+      return str.toLowerCase()
+        .replace(/\([^)]*\)/g, '')              // Strip parenthetical: (NC), (TX)
+        .replace(/\s*-\s*[a-z]{2,6}$/i, '')     // Strip trailing acronyms: - ECVA
+        .replace(/[^a-z0-9\s]/g, '')
+        .replace(/\b(inc|llc|llp|corp|corporation|company|co|pc|pllc|md|od|dds|pa|psc)\b/g, '')
+        .replace(/\s+/g, ' ').trim();
     };
 
     const normClient = normalizeForSearch(clientName);

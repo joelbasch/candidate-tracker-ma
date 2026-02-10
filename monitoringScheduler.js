@@ -175,15 +175,23 @@ class MonitoringScheduler {
       'od ', ' od,', ' od.', 'o.d.', 'doctor of optometry'
     ];
 
+    // Clean client name: strip (NC), - ECVA, *, & for better search and matching
+    const cleanClientName = clientName
+      .replace(/\([^)]*\)/g, '')           // Strip (NC), (TX), etc.
+      .replace(/\s*-\s*[A-Z]{2,6}$/i, '') // Strip trailing acronyms: - ECVA
+      .replace(/[*&]/g, '')               // Strip * and &
+      .replace(/\s+/g, ' ')
+      .trim();
+
     // Step 1: Find the client's OFFICIAL website first
     // Include "optometry" in search to bias toward the right industry
-    const searchData = await this.googleSearch.makeRequest(`"${clientName}" optometry OR optometrist OR "eye care"`, 10);
+    const searchData = await this.googleSearch.makeRequest(`"${cleanClientName}" optometry OR optometrist OR "eye care"`, 10);
 
     let clientWebsite = null;
     let clientDomain = null;
 
     if (searchData && searchData.organic) {
-      const clientNorm = clientName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const clientNorm = cleanClientName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
       for (const r of searchData.organic) {
         if (!r.link) continue;
@@ -390,18 +398,27 @@ class MonitoringScheduler {
       }
     }
 
-    // Filter out junk: names with too many words, or that contain nav/article keywords
+    // Filter out junk: names with too many words, navigation items, or generic phrases
     const junkWords = ['report', 'summit', 'corner', 'honor', 'moves', 'career', 'newsroom',
       'subscribe', 'newsletter', 'copyright', 'privacy', 'terms', 'login', 'sign in',
       'search', 'menu', 'navigation', 'footer', 'header', 'sidebar', 'article', 'blog',
-      'watch', 'video', 'podcast', 'webinar', 'event', 'conference'];
+      'watch', 'video', 'podcast', 'webinar', 'event', 'conference',
+      // Nav/UI elements that get scraped as practice names
+      'about us', 'contact', 'appointment', 'schedule', 'details', 'statement',
+      'pediatric', 'exams', 'our team', 'our doctor', 'find a', 'learn more',
+      'read more', 'click here', 'request', 'patient', 'insurance', 'hours',
+      'home', 'sitemap', 'accessibility', 'careers', 'faq', 'review'];
     const filtered = [...names].filter(name => {
       const lower = name.toLowerCase();
       const words = name.split(/\s+/);
-      // Max 6 words for a practice name
-      if (words.length > 6) return false;
+      // Max 5 words for a practice name
+      if (words.length > 5) return false;
+      // Min 2 words (single words aren't practice names)
+      if (words.length < 2) return false;
       // Skip if it contains junk keywords
       if (junkWords.some(j => lower.includes(j))) return false;
+      // Skip if it's just the parent name with extra words
+      if (lower.includes(parentName.toLowerCase().replace(/[*]/g, '').trim())) return false;
       return true;
     });
 
@@ -629,8 +646,11 @@ class MonitoringScheduler {
                   console.log(`    📊 Got ${allResults.length} results for address`);
 
                   // Check titles and snippets for client match
+                  // Clean client name for matching (strip *, (NC), - ECVA, etc.)
+                  const cleanClient = clientName.replace(/\([^)]*\)/g, '').replace(/\s*-\s*[A-Z]{2,6}$/i, '').replace(/[*&]/g, '').trim();
+
                   for (const result of allResults) {
-                    const titleCheck = this.companyResearch.areCompaniesRelated(result.title, clientName);
+                    const titleCheck = this.companyResearch.areCompaniesRelated(result.title, cleanClient);
                     if (titleCheck.match) {
                       matched = true;
                       matchReason = `Address ${addr.line1}, ${addr.city}, ${addr.state} has "${result.title}" which matches "${clientName}". ${titleCheck.reason}`;
@@ -640,8 +660,11 @@ class MonitoringScheduler {
                       break;
                     }
 
-                    const snippetCheck = this.companyResearch.areCompaniesRelated(result.snippet, clientName);
-                    if (snippetCheck.match) {
+                    // For snippet matches: require the client name to literally appear in the snippet
+                    // (not just an alias match — snippets from MapQuest etc. can mention nearby businesses)
+                    const snippetLower = (result.snippet || '').toLowerCase();
+                    const clientLower = cleanClient.toLowerCase();
+                    if (snippetLower.includes(clientLower)) {
                       matched = true;
                       matchReason = `Address ${addr.line1}, ${addr.city}, ${addr.state} - result "${result.title}" mentions "${clientName}"`;
                       confidence = 'Medium';
