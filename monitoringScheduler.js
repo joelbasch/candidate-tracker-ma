@@ -142,6 +142,17 @@ class MonitoringScheduler {
   async enrichClientFromWebsite(clientName) {
     console.log(`  🌐 ${clientName}:`);
 
+    // Blacklist: never treat these as the client's official website
+    const blacklistedDomains = new Set([
+      'indeed', 'glassdoor', 'linkedin', 'facebook', 'twitter', 'instagram',
+      'yelp', 'bbb', 'mapquest', 'yellowpages', 'whitepages', 'manta',
+      'crunchbase', 'bloomberg', 'zoominfo', 'dnb', 'hoovers',
+      'google', 'apple', 'bing', 'yahoo', 'wikipedia', 'reddit',
+      'healthgrades', 'zocdoc', 'vitals', 'webmd', 'npidb',
+      'visionmonday', 'reviewofoptometry', 'aoa', 'allaboutvision',
+      'eyesoneyecare', 'optometrytimes', 'invisionmag'
+    ]);
+
     // Step 1: Find the client's OFFICIAL website first
     const searchData = await this.googleSearch.makeRequest(`"${clientName}" official site`, 10);
 
@@ -149,18 +160,31 @@ class MonitoringScheduler {
     let clientDomain = null;
 
     if (searchData && searchData.organic) {
+      const clientNorm = clientName.toLowerCase().replace(/[^a-z0-9]/g, '');
+
       for (const r of searchData.organic) {
         if (!r.link) continue;
         try {
           const url = new URL(r.link);
           const host = url.hostname.replace('www.', '').toLowerCase();
-          const clientNorm = clientName.toLowerCase().replace(/[^a-z0-9]/g, '');
-          const hostNorm = host.replace(/[^a-z0-9]/g, '').replace(/com$/, '');
+          const hostNorm = host.replace(/[^a-z0-9]/g, '').replace(/(com|org|net|io)$/, '');
 
-          // Domain must contain the client name (or vice versa) to be their site
-          if (hostNorm.includes(clientNorm) || clientNorm.includes(hostNorm.split('.')[0])) {
+          // Skip blacklisted domains (job boards, social media, directories)
+          if (blacklistedDomains.has(hostNorm) || blacklistedDomains.has(host.split('.')[0])) {
+            continue;
+          }
+
+          // Domain must meaningfully match the client name
+          // Either: domain contains the full client name, or client name contains the full domain
+          // For reverse match (client contains domain), require domain to be at least 5 chars
+          // to prevent short domains like "svs.com" matching "SVS Vision Optometry"
+          const domainMatch = hostNorm.includes(clientNorm) ||
+            (hostNorm.length >= 5 && clientNorm.includes(hostNorm));
+
+          if (domainMatch) {
             clientWebsite = `${url.protocol}//${url.hostname}`;
             clientDomain = host;
+            console.log(`    🌐 Official website: ${clientWebsite}`);
             break;
           }
         } catch (e) {}
@@ -181,6 +205,14 @@ class MonitoringScheduler {
     if (locSearch && locSearch.organic) {
       for (const r of locSearch.organic) {
         const link = (r.link || '').toLowerCase();
+        // Verify the result is actually from the client's domain (Google sometimes leaks other domains)
+        try {
+          const resultHost = new URL(r.link).hostname.replace('www.', '').toLowerCase();
+          if (resultHost !== clientDomain && !resultHost.endsWith('.' + clientDomain)) {
+            continue; // Skip results from wrong domain
+          }
+        } catch (e) { continue; }
+
         if (link.includes('location') || link.includes('practice') ||
             link.includes('office') || link.includes('our-brands')) {
           practicesPageUrl = r.link;
