@@ -75,23 +75,24 @@ class GoogleSearchService {
    * Fetch a web page's text content (for scraping search results)
    * Returns plain text extracted from the page, limited to first 5000 chars
    */
-  async fetchPageContent(url, timeoutMs = 5000) {
+  async fetchPageContent(url, timeoutMs = 8000) {
     if (!url || url.includes('serper.dev') || url.includes('serpapi.com') || url.includes('google.com/search')) {
       return '';
     }
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(''), timeoutMs);
-      
+
       const protocol = url.startsWith('https') ? https : http;
-      
+
       try {
-        const req = protocol.get(url, { 
-          headers: { 
-            'User-Agent': 'Mozilla/5.0 (compatible; EyeToEyeBot/1.0)',
-            'Accept': 'text/html'
+        const req = protocol.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
           },
-          timeout: timeoutMs 
+          timeout: timeoutMs
         }, (res) => {
           // Follow redirects (up to 2)
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
