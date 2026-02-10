@@ -708,7 +708,7 @@ class MonitoringScheduler {
           // Google search to check if CMS orgs are subsidiaries/related to the client
           // This catches parent companies (marked with *) and any client whose website
           // couldn't be scraped for practice names
-          if (!matched && allOrgNames.length > 0 && this.googleSearch && this.googleSearch.apiKey) {
+          if (!matched && allOrgNames.length > 0 && this.googleSearch && this.googleSearch.apiKey && !this.googleSearch.creditsExhausted) {
             const cleanClient = clientName.replace(/\([^)]*\)/g, '').replace(/\s*-\s*[A-Z]{2,6}$/i, '').replace(/[*&]/g, '').trim();
             for (const orgName of allOrgNames) {
               if (matched) break;
@@ -744,7 +744,7 @@ class MonitoringScheduler {
           }
 
           // Step 3: If no direct org match, Google search each NPI address
-          if (!matched && this.googleSearch && this.googleSearch.apiKey) {
+          if (!matched && this.googleSearch && this.googleSearch.apiKey && !this.googleSearch.creditsExhausted) {
             const addressesToSearch = relevantProvider.allAddresses || [];
             // Add primary address if not in list
             if (addrLine && !addressesToSearch.find(a => a.line1 === addrLine)) {
@@ -824,8 +824,19 @@ class MonitoringScheduler {
                   }
 
                   // Step 4: Scrape top pages to check for parent company names
+                  // Skip directory sites that list many unrelated practices
+                  const addrDirectoryDomains = ['eyedoctor.io', 'npidb.org', 'npiprofile.com',
+                    'healthgrades.com', 'webmd.com', 'zocdoc.com', 'vitals.com',
+                    'yelp.com', 'yellowpages.com', 'mapquest.com', 'cms.gov',
+                    'facebook.com', 'linkedin.com', 'instagram.com', 'wikipedia.org'];
                   if (!matched) {
-                    const pagesToCheck = allResults.filter(r => r.link && !r.isLocal).slice(0, 3);
+                    const pagesToCheck = allResults.filter(r => {
+                      if (!r.link || r.isLocal) return false;
+                      try {
+                        const host = new URL(r.link).hostname.toLowerCase();
+                        return !addrDirectoryDomains.some(d => host.includes(d));
+                      } catch (e) { return true; }
+                    }).slice(0, 3);
                     for (const result of pagesToCheck) {
                       try {
                         const pageText = await this.googleSearch.fetchPageContent(result.link);
@@ -884,7 +895,8 @@ class MonitoringScheduler {
 
     // --- Google Search (Step 3 — runs BEFORE LinkedIn to save Netrows credits) ---
     // If Google finds the candidate on a client's website/news, no need for LinkedIn
-    if (this.googleSearch && this.googleSearch.apiKey && !this.alertExists(candidate.id, clientName, 'Google Search')) {
+    // Skip entirely if Serper credits are exhausted
+    if (this.googleSearch && this.googleSearch.apiKey && !this.googleSearch.creditsExhausted && !this.alertExists(candidate.id, clientName, 'Google Search')) {
       try {
         const searchResults = await this.googleSearch.searchCandidate(candidate.full_name);
 
@@ -938,10 +950,14 @@ class MonitoringScheduler {
     }
 
     // --- LinkedIn (Step 4 — deep check, uses Netrows credit) ---
+    // Propagate credit exhaustion from Google to LinkedIn (both use Serper)
+    if (this.googleSearch && this.googleSearch.creditsExhausted && this.linkedin) {
+      this.linkedin.creditsExhausted = true;
+    }
     // Skip if Google already found a match (save Netrows credits)
     if (candidateResults.google) {
       console.log(`    ⏭️ LinkedIn: Skipping — Google already confirmed match (saving Netrows credit)`);
-    } else if (this.linkedin && this.linkedin.configured && !this.alertExists(candidate.id, clientName, 'LinkedIn')) {
+    } else if (this.linkedin && this.linkedin.configured && !this.linkedin.creditsExhausted && !this.alertExists(candidate.id, clientName, 'LinkedIn')) {
       try {
         const profileData = await this.linkedin.findProfile(candidate.full_name);
 

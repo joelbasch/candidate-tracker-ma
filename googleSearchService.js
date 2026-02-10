@@ -19,6 +19,7 @@ class GoogleSearchService {
     // Support both old SERPAPI keys (for migration) and new SERPER key
     this.apiKey = process.env.SERPER_API_KEY || process.env.SERPAPI_KEY || process.env.SERPAPI_API_KEY || '';
     this.apiEndpoint = 'google.serper.dev';
+    this.creditsExhausted = false; // Track when API credits run out
 
     if (this.apiKey) {
       console.log(`✓ Google Search Service configured (Serper.dev, key: ${this.apiKey.substring(0, 8)}...)`);
@@ -31,6 +32,9 @@ class GoogleSearchService {
    * Make a POST request to Serper.dev API
    */
   async makeRequest(query, numResults = 10) {
+    if (this.creditsExhausted) {
+      return null;
+    }
     return new Promise((resolve) => {
       const postData = JSON.stringify({
         q: query,
@@ -228,10 +232,10 @@ class GoogleSearchService {
 
     console.log(`    📝 Name variants to search: ${nameVariants.join(' | ')}`);
 
-    // Build queries from name variants
+    // Build queries from name variants — 1 search per variant to conserve Serper credits
+    // ("Name" optometrist is sufficient; "Name" OD optometrist rarely adds unique results)
     const queries = [];
     for (const name of nameVariants) {
-      queries.push(`"${name}" OD optometrist`);
       queries.push(`"${name}" optometrist`);
     }
     // Deduplicate
@@ -295,6 +299,11 @@ class GoogleSearchService {
       return [];
     }
 
+    // Don't waste time if credits are already exhausted
+    if (this.creditsExhausted) {
+      return [];
+    }
+
     const data = await this.makeRequest(query, 10);
 
     if (!data) {
@@ -304,7 +313,17 @@ class GoogleSearchService {
 
     // Check for API errors
     if (data.error || data.message) {
-      console.log(`    ❌ Serper Error: ${data.error || data.message}`);
+      const errMsg = data.error || data.message;
+      // Detect credit exhaustion and stop all future API calls
+      if (errMsg.toLowerCase().includes('credit') || errMsg.toLowerCase().includes('limit') || errMsg.toLowerCase().includes('quota')) {
+        if (!this.creditsExhausted) {
+          this.creditsExhausted = true;
+          console.log(`    🚫 SERPER CREDITS EXHAUSTED — skipping all remaining Google/LinkedIn searches`);
+          console.log(`    💡 Monitoring will continue with NPI data only (free API)`);
+        }
+        return [];
+      }
+      console.log(`    ❌ Serper Error: ${errMsg}`);
       return [];
     }
 
@@ -381,7 +400,11 @@ class GoogleSearchService {
 
   /**
    * Check if any search results mention the client company or parent company
-   * ENHANCED: Now also checks scraped page content for mentions
+   *
+   * REDESIGNED to reduce false positives:
+   * - CHECK 1 (titles/snippets): Full-string match + word match WITH stop words
+   * - CHECK 2 (page content): Full-string match ONLY (no word decomposition)
+   * - Directory sites (eyedoctor.io, npidb.org, etc.) are skipped
    */
   checkResultsForClient(searchResults, clientName, companyResearch) {
     if (!searchResults || !searchResults.allResults || searchResults.allResults.length === 0) {
@@ -398,16 +421,36 @@ class GoogleSearchService {
         .replace(/\s+/g, ' ').trim();
     };
 
+    // Healthcare/industry stop words — too generic to use for word matching
+    const searchStopWords = new Set([
+      'health', 'healthcare', 'center', 'centre', 'clinic', 'medical', 'doctor',
+      'doctors', 'care', 'services', 'professional', 'professionals', 'practice',
+      'group', 'associates', 'partners', 'management', 'national', 'american',
+      'family', 'premier', 'advanced', 'specialty', 'comprehensive',
+      'vision', 'optical', 'eyecare', 'eyewear', 'optometry', 'optometric',
+      'optometrist', 'ophthalmology', 'ophthalmologist', 'ophthalmic',
+      'primary', 'general', 'community', 'regional', 'county', 'state',
+      'north', 'south', 'east', 'west', 'central', 'metro', 'greater'
+    ]);
+
+    // Directory sites whose pages list many unrelated doctors/practices
+    const directoryDomains = ['eyedoctor.io', 'npidb.org', 'npiprofile.com',
+      'healthgrades.com', 'webmd.com', 'zocdoc.com', 'vitals.com',
+      'yelp.com', 'yellowpages.com', 'mapquest.com', 'bbb.org',
+      'facebook.com', 'linkedin.com', 'instagram.com', 'twitter.com',
+      'indeed.com', 'glassdoor.com', 'wikipedia.org', 'cms.gov',
+      'manta.com', 'crunchbase.com', 'rocketreach.co', 'zoominfo.com',
+      'signalhire.com', 'lusha.com', 'data.cms.gov'];
+
     const normClient = normalizeForSearch(clientName);
-    
+
     // Get all names to check against (client + all its subsidiaries)
     const namesToCheck = [normClient];
-    
+
     // If companyResearch is available, get all related names
     if (companyResearch && typeof companyResearch.getAllRelationships === 'function') {
       try {
         const allRelationships = companyResearch.getAllRelationships();
-        // getAllRelationships() returns { manual: { parent: [subs] }, cached: { parent: [subs] } }
         const processRelObject = (relObj) => {
           if (!relObj || typeof relObj !== 'object') return;
           for (const [parent, subs] of Object.entries(relObj)) {
@@ -433,19 +476,33 @@ class GoogleSearchService {
       }
     }
 
-    // Remove duplicates and filter short names
-    const uniqueNames = [...new Set(namesToCheck)].filter(n => n.length > 2);
+    // Remove duplicates, filter short names, and filter names that are ALL stop words
+    const uniqueNames = [...new Set(namesToCheck)].filter(n => {
+      if (n.length <= 2) return false;
+      // Ensure the name has at least one non-stop word
+      const nameWords = n.split(' ').filter(w => w.length > 2);
+      const nonStopWords = nameWords.filter(w => !searchStopWords.has(w));
+      return nonStopWords.length > 0;
+    });
 
-    // CHECK 1: Search result titles and snippets (existing logic, enhanced)
+    // CHECK 1: Search result titles and snippets
+    // Full-string match is high confidence; word match requires non-generic words
     for (const result of searchResults.allResults) {
+      // Skip directory sites
+      const resultHost = (() => {
+        try { return new URL(result.link).hostname.toLowerCase(); } catch (e) { return ''; }
+      })();
+      const isDirectory = directoryDomains.some(d => resultHost.includes(d));
+      if (isDirectory) continue;
+
       const normTitle = normalizeForSearch(result.title);
       const normSnippet = normalizeForSearch(result.snippet);
       const normLink = normalizeForSearch(result.displayLink || result.link);
       const combined = `${normTitle} ${normSnippet} ${normLink}`;
 
       for (const checkName of uniqueNames) {
-        // Full name match
-        if (combined.includes(checkName)) {
+        // Full name match (the entire client name appears as a substring)
+        if (checkName.length >= 5 && combined.includes(checkName)) {
           return {
             match: true,
             reason: `Google Search: "${result.title}" mentions "${clientName}"`,
@@ -455,14 +512,15 @@ class GoogleSearchService {
           };
         }
 
-        // Multi-word company name: check if all significant words appear
-        const words = checkName.split(' ').filter(w => w.length > 3);
-        if (words.length >= 2) {
-          const allWordsFound = words.every(w => combined.includes(w));
-          if (allWordsFound) {
+        // Word match: require 2+ NON-STOP-WORD matches
+        const significantWords = checkName.split(' ')
+          .filter(w => w.length > 3 && !searchStopWords.has(w));
+        if (significantWords.length >= 2) {
+          const matchedWords = significantWords.filter(w => combined.includes(w));
+          if (matchedWords.length >= 2) {
             return {
               match: true,
-              reason: `Google Search: "${result.title}" references "${clientName}" (word match)`,
+              reason: `Google Search: "${result.title}" references "${clientName}" (matched: ${matchedWords.join(', ')})`,
               matchedResult: result,
               matchedText: result.title,
               sourceUrl: result.link
@@ -472,40 +530,32 @@ class GoogleSearchService {
       }
     }
 
-    // CHECK 2: Scraped page contents (NEW - much deeper matching)
+    // CHECK 2: Scraped page contents — FULL-STRING MATCH ONLY
+    // Word decomposition on 5000 chars of page text produces too many false positives
+    // (e.g., "health" + "center" appears on every healthcare page)
     if (searchResults.pageContents && Object.keys(searchResults.pageContents).length > 0) {
       for (const [pageUrl, pageText] of Object.entries(searchResults.pageContents)) {
+        // Skip directory sites
+        const pageHost = (() => {
+          try { return new URL(pageUrl).hostname.toLowerCase(); } catch (e) { return ''; }
+        })();
+        const isDirectory = directoryDomains.some(d => pageHost.includes(d));
+        if (isDirectory) continue;
+
         const normPage = normalizeForSearch(pageText);
-        
+
         for (const checkName of uniqueNames) {
-          if (normPage.includes(checkName)) {
-            // Found client name in page content!
+          // ONLY full-string match — no word decomposition on page content
+          if (checkName.length >= 5 && normPage.includes(checkName)) {
             const matchingResult = searchResults.allResults.find(r => r.link === pageUrl);
             return {
               match: true,
-              reason: `Google Search: Page content at "${pageUrl.substring(0, 60)}..." mentions "${clientName}"`,
+              reason: `Google Search: Page at "${pageUrl.substring(0, 60)}..." mentions "${clientName}"`,
               matchedResult: matchingResult || { title: pageUrl, link: pageUrl },
               matchedText: matchingResult?.title || pageUrl,
               sourceUrl: pageUrl,
               matchSource: 'page_content'
             };
-          }
-          
-          // Multi-word check on page content too
-          const words = checkName.split(' ').filter(w => w.length > 3);
-          if (words.length >= 2) {
-            const allWordsFound = words.every(w => normPage.includes(w));
-            if (allWordsFound) {
-              const matchingResult = searchResults.allResults.find(r => r.link === pageUrl);
-              return {
-                match: true,
-                reason: `Google Search: Page at "${pageUrl.substring(0, 60)}..." references "${clientName}" (word match in page)`,
-                matchedResult: matchingResult || { title: pageUrl, link: pageUrl },
-                matchedText: matchingResult?.title || pageUrl,
-                sourceUrl: pageUrl,
-                matchSource: 'page_content'
-              };
-            }
           }
         }
       }

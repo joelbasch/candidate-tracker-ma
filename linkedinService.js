@@ -18,6 +18,7 @@ class LinkedInService {
     this.apiKey = process.env.SERPER_API_KEY || process.env.SERPAPI_KEY || process.env.SERPAPI_API_KEY || '';
     this.configured = !!this.apiKey;
     this.apiEndpoint = 'google.serper.dev';
+    this.creditsExhausted = false; // Shared flag — set by GoogleSearchService if credits run out
 
     // Netrows API for full LinkedIn profile data
     this.netrowsApiKey = process.env.NETROWS_API_KEY || '';
@@ -41,6 +42,7 @@ class LinkedInService {
    * Make a POST request to Serper.dev API
    */
   async makeRequest(query, numResults = 5) {
+    if (this.creditsExhausted) return null;
     return new Promise((resolve) => {
       const postData = JSON.stringify({
         q: query,

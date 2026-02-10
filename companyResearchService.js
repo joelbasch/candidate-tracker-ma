@@ -128,6 +128,10 @@ class CompanyResearchService {
       .replace(/\s*-\s*[A-Z]{2,6}$/i, '')     // Strip trailing acronyms: "- ECVA", "- AVP"
       .replace(/[*.,'"!?()&]/g, '')
       .replace(/\b(inc|llc|llp|corp|corporation|company|co|pc|pllc|md|od|dds|pa|psc)\b/g, '')
+      // Normalize common compound words: "eye care" → "eyecare", "eye wear" → "eyewear"
+      .replace(/\beye\s+care\b/g, 'eyecare')
+      .replace(/\beye\s+wear\b/g, 'eyewear')
+      .replace(/\beye\s+glass(es)?\b/g, 'eyeglass$1')
       .replace(/\s+/g, ' ')
       .trim();
   }
