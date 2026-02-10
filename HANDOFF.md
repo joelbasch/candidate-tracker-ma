@@ -1,36 +1,40 @@
-# Handoff Document - Candidate Tracker Session
+# Handoff Document - Candidate Tracker
 
 ## Date: February 10, 2026
 ## Branch: `claude/general-work-aDeNn`
 
-## What Was Done This Session
+## What Has Been Done (All Sessions)
 
-### 1. Netrows API Integration (linkedinService.js)
-- Integrated Netrows API for full LinkedIn profile data including employment history with dates
-- Two-step approach: Google Search (Serper, free) finds LinkedIn URL → Netrows (100 free credits) gets full profile
-- Falls back to Google snippet parsing if Netrows not configured
-- API Key: `pk_live_3d735c548a4955433f4dd565b722c16e`
+### Session 1: Core Integration
+1. **Netrows API Integration** (linkedinService.js)
+   - Two-step LinkedIn: Serper (free) finds URL → Netrows (100 credits) gets full profile
+   - Falls back to Google snippet parsing if Netrows not configured
+2. **Reordered Monitoring** (monitoringScheduler.js)
+   - Pipeline → NPI → Google Search → LinkedIn (Google before LinkedIn to save Netrows credits)
+   - LinkedIn SKIPPED if Google already matched
+3. **Per-Candidate Client Enrichment** (monitoringScheduler.js)
+   - Lazy per-candidate with caching (not upfront batch)
+   - Junk domain filtering (indeed, instagram, zocdoc, etc.)
+   - Practice name extraction with junk word filter
+4. **Bug Fixes**
+   - `getAllRelationships()` returns object not array → fixed in LinkedIn + Google services
+   - Google page scraping User-Agent changed from `EyeToEyeBot/1.0` to Chrome UA, timeout 8s
+   - Date extraction from Serper results and scraped pages
+   - User needed npiService.js with `getOrganizations()` for CMS Reassignment API
 
-### 2. Reordered Monitoring Steps (monitoringScheduler.js)
-- Changed from: Pipeline → NPI → LinkedIn → Google
-- Changed to: **Pipeline → NPI → Google Search → LinkedIn**
-- LinkedIn is SKIPPED if Google already found a match (saves Netrows credits)
-
-### 3. Per-Candidate Client Enrichment (monitoringScheduler.js)
-- Moved from upfront batch (all 26 clients scraped before any candidates) to lazy per-candidate with caching
-- Each client is enriched on first encounter, cached for subsequent candidates
-- Added junk domain filtering: skips indeed.com, instagram.com, zocdoc.com, yelp.com, etc.
-- Cleaned up practice name extraction to reject garbage like "Get LASIK Pricing Does Cutarelli Vision"
-
-### 4. Bug Fixes
-- Fixed `getAllRelationships()` bug in linkedinService.js and googleSearchService.js (returns `{manual:[], cached:[]}` not array)
-- Fixed Google page scraping: changed User-Agent from custom `EyeToEyeBot/1.0` to Chrome UA, increased timeout to 8s
-- Added `date` field capture from Serper results
-- Added `extractPageDates()` for date extraction from scraped pages
-
-### 5. npiService.js
-- User needed this file downloaded to get `getOrganizations()` (CMS Reassignment API)
-- CMS Reassignment now working: `✓ CMS Reassignment dataset UUID: 20f51cff-...`
+### Session 2: Accuracy Fixes
+1. **Company Matching False Positives FIXED** (companyResearchService.js)
+   - Added 50+ stopwords to `areCompaniesRelated()` common-word matching
+   - Stops generic terms like "vision", "eyecare", "associates", "optical", "services" from causing matches
+   - Fixes: "Boulder Vision Associates" no longer falsely matches "Cutarelli Vision"
+2. **LinkedIn Middle Name Problem FIXED** (linkedinService.js)
+   - `findProfile()` now generates name variants without middle names
+   - "Christopher Inman Clark" also tries "Christopher Clark"
+   - Scoring still uses full name for URL validation
+3. **Netrows Debugging Added** (linkedinService.js)
+   - `getFullProfile()` now logs raw response structure (keys, array sizes, first elements)
+   - Will show `📦 Netrows raw keys: ...` in console output
+   - Need user to run and share output so we can map actual Netrows field names
 
 ## User's API Keys
 - **Serper (Google Search)**: `92df34822241944d6f3c59fb109c276c21af2758`
@@ -39,9 +43,10 @@
 ## User's Windows Setup
 - No git installed, downloads files via curl from raw GitHub URLs
 - Working folder: `C:\Users\User\Downloads\candidate-tracker-ma-claude-continue-windows-dev-OkEeR (7)\candidate-tracker-ma-claude-continue-windows-dev-OkEeR\`
-- Update process (user knows these commands):
+- Download files:
   ```
   set U=https://raw.githubusercontent.com/joelbasch/candidate-tracker-ma/claude/general-work-aDeNn
+  curl -o companyResearchService.js %U%/companyResearchService.js
   curl -o linkedinService.js %U%/linkedinService.js
   curl -o monitoringScheduler.js %U%/monitoringScheduler.js
   curl -o googleSearchService.js %U%/googleSearchService.js
@@ -53,54 +58,47 @@
   set NETROWS_API_KEY=pk_live_3d735c548a4955433f4dd565b722c16e
   node server.js
   ```
-- Clear database: `Invoke-WebRequest -Method POST -Uri http://localhost:3001/api/clear-all` (in PowerShell)
+- Clear database (PowerShell): `Invoke-WebRequest -Method POST -Uri http://localhost:3001/api/clear-all`
+- Run monitoring (PowerShell): `Invoke-WebRequest -Method POST -Uri http://localhost:3001/api/monitoring/run`
 
-## Known Issues That NEED FIXING (Priority Order)
+## Known Issues Still Open (Priority Order)
 
-### 1. "Vision" False Positive in Company Matching (CRITICAL)
-- `companyResearchService.areCompaniesRelated()` matches on generic words like "vision", "eyecare", "services", "optometry" (5+ chars)
-- Example: "Boulder Vision Associates" falsely matched "Cutarelli Vision" because both contain "vision"
-- Richard A. Cross got a wrong NPI alert due to this
-- Fix: The `areCompaniesRelated()` method needs a stopwords list to exclude generic industry terms
-
-### 2. Netrows Returns Empty Employment History
+### 1. Netrows Returns Empty Employment History
 - Every profile returns `"0 positions in history"`
-- The profile is found, full name and current employer come through, but `employmentHistory` array is empty
-- Need to debug: log the raw Netrows API response to see what fields it actually returns
-- The `parseNetrowsProfile()` method checks many field names but might be missing the actual one Netrows uses
-- This makes LinkedIn matching almost useless since it can only match current employer, not history
+- Profile is found (full name, current employer work), but `employmentHistory` array is empty
+- **Raw response logging was added** - next run will show `📦 Netrows raw keys: ...` with actual field names
+- `parseNetrowsProfile()` checks many field name variants but may be missing the one Netrows uses
+- Once user shares the raw keys output, fix the field name mapping in `parseNetrowsProfile()`
 
-### 3. Google Page Scraping Still Failing (Pages scraped: 0)
-- Despite fixing User-Agent and timeout, most pages still return empty
-- The scraping happens (`Scraping 5 page(s)...`) but `Pages scraped: 0`
-- Likely cause: many sites use JavaScript rendering (React/SPA) so the raw HTML has no content
-- The one success was a simple static site (lhvc.com)
-- Consider: only scrape pages that are likely static (news sites, practice websites), skip SPAs
+### 2. Google Page Scraping Still Failing (Pages scraped: 0)
+- Most pages return empty despite Chrome UA and 8s timeout
+- Cause: JS-rendered sites (React/SPA) have no content in raw HTML
+- Only static sites work (e.g., lhvc.com)
+- Consider: skip SPA-heavy sites, or use Serper's snippet data instead of scraping
 
-### 4. LinkedIn Middle Name Problem
-- "Christopher Inman Clark" → searches for exact "Christopher Inman Clark" on LinkedIn → finds nothing
-- Should also try without middle name: "Christopher Clark"
-- Fix: in `linkedinService.cleanName()` or `findProfile()`, generate a variant without middle name(s)
-
-### 5. NPI Name Selection with Common Names
-- "Christopher Clark" returned 50 matches, picked the first one which may be wrong
-- The current logic picks the first optometry-related result, but with 50 matches this is unreliable
-- Could improve by cross-referencing with the candidate's known location/state from the submission
+### 3. NPI Common Name Matching
+- "Christopher Clark" returned 50 matches, picks first optometry-related one
+- Could be wrong person
+- Improve by cross-referencing with candidate's known location/state from submission data
 
 ## What User Wants Next
-- User explicitly said: **"I want you to remember there's workflow - I'm going to come back to it later. Before we start automating I need to make sure that the backend is working properly."**
-- Focus is on fixing the backend accuracy issues above before any automation
-- Future plans include: scheduling, CRM integration (Loxo), multi-tenant SaaS, mass automation
-- User wants this to work for ANY industry, not just eye care (important for future)
+- **"Before we start automating I need to make sure that the backend is working properly."**
+- User needs to run monitoring with the new fixes and check:
+  1. Are the "vision" false positives gone?
+  2. What does the Netrows raw response look like? (📦 lines in console)
+  3. Do middle-name candidates now find LinkedIn profiles?
+- Future: scheduling, Loxo CRM integration, multi-tenant SaaS
+- Must work for ANY industry, not just eye care
 
-## Files Modified This Session
+## Files Modified (All Sessions)
 | File | Changes |
 |------|---------|
-| `linkedinService.js` | Netrows integration, getAllRelationships fix, scoring system |
-| `monitoringScheduler.js` | Reorder Google before LinkedIn, per-candidate enrichment, junk domain filter, practice name cleanup, date extraction |
-| `googleSearchService.js` | getAllRelationships fix, date field, browser User-Agent, 8s timeout |
-| `npiService.js` | No code changes, but user needed to download the version with getOrganizations |
-| `update.js` | Helper script (can be deleted, user now uses curl commands) |
+| `companyResearchService.js` | Stopwords in areCompaniesRelated() to prevent false positives |
+| `linkedinService.js` | Netrows integration, middle name variants, raw response logging, scoring system |
+| `monitoringScheduler.js` | Reorder Google→LinkedIn, per-candidate enrichment, junk domains, practice name cleanup, date extraction |
+| `googleSearchService.js` | getAllRelationships fix, date field, Chrome User-Agent, 8s timeout |
+| `npiService.js` | No code changes (user needed version with getOrganizations) |
+| `update.js` | Helper script (can be deleted, user uses curl commands) |
 
 ## Architecture Reminder
 - Node.js/Express backend, React 18 frontend (CDN, Babel standalone)
