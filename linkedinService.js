@@ -154,25 +154,59 @@ class LinkedInService {
     result.fullName = profile.full_name || profile.fullName || profile.name ||
       [profile.first_name || profile.firstName, profile.last_name || profile.lastName].filter(Boolean).join(' ') || null;
     result.headline = profile.headline || profile.tagline || null;
-    result.location = profile.location || profile.geo_location || null;
+    // Handle geo as object {country, city, countryCode} or string
+    const geo = profile.geo || profile.geo_location || profile.location;
+    result.location = (geo && typeof geo === 'object') ? [geo.city, geo.country].filter(Boolean).join(', ') : (geo || null);
+
+    // Debug: log raw profile keys to help diagnose parsing issues
+    console.log(`    📦 Netrows raw keys: ${Object.keys(profile).join(', ')}`);
+    for (const key of ['geo', 'educations', 'position', 'positions', 'experiences', 'skills', 'projects']) {
+      const val = profile[key];
+      if (val === undefined) continue;
+      if (Array.isArray(val)) {
+        console.log(`    📦 ${key}: Array[${val.length}]${val.length > 0 ? ' → first: ' + JSON.stringify(val[0]).substring(0, 150) : ''}`);
+      } else if (val && typeof val === 'object') {
+        console.log(`    📦 ${key}: Object{${Object.keys(val).join(', ')}}`);
+      }
+    }
 
     // Extract employment history - handle various response structures
-    const experiences = profile.experiences || profile.employment_history || profile.positions ||
-      profile.experience || profile.work_experience || [];
+    // Netrows uses "position" (singular), other APIs use "positions", "experiences", etc.
+    const experiences = profile.position || profile.positions || profile.experiences ||
+      profile.employment_history || profile.experience || profile.work_experience || [];
 
     // Handle if experiences is nested (e.g., { data: [...] })
     const expArray = Array.isArray(experiences) ? experiences : (experiences.data || experiences.values || []);
 
+    /**
+     * Convert a date value to a readable string
+     * Handles: {year, month, day} objects, strings, null
+     */
+    const formatDate = (dateVal) => {
+      if (!dateVal) return null;
+      if (typeof dateVal === 'string') return dateVal;
+      if (typeof dateVal === 'object' && dateVal.year) {
+        const y = dateVal.year;
+        const m = dateVal.month ? String(dateVal.month).padStart(2, '0') : null;
+        const d = dateVal.day && dateVal.day > 0 ? String(dateVal.day).padStart(2, '0') : null;
+        if (m && m !== '00' && d) return `${y}-${m}-${d}`;
+        if (m && m !== '00') return `${y}-${m}`;
+        return String(y);
+      }
+      return String(dateVal);
+    };
+
     for (const exp of expArray) {
       if (!exp) continue;
 
-      const company = exp.company || exp.company_name || exp.organization || exp.companyName ||
+      const company = exp.companyName || exp.company || exp.company_name || exp.organization ||
         (exp.company_info && (exp.company_info.name || exp.company_info.company_name)) || null;
       const title = exp.title || exp.position || exp.role || exp.job_title || null;
-      const startDate = exp.start_date || exp.starts_at || exp.from || exp.startDate || null;
-      const endDate = exp.end_date || exp.ends_at || exp.to || exp.endDate || null;
-      const isCurrent = exp.current === true || exp.is_current === true || endDate === null || endDate === 'Present';
-      const location = exp.location || exp.geo_location || null;
+      const startDate = formatDate(exp.start || exp.start_date || exp.starts_at || exp.from || exp.startDate);
+      const endDate = formatDate(exp.end || exp.end_date || exp.ends_at || exp.to || exp.endDate);
+      const isCurrent = exp.current === true || exp.is_current === true || endDate === null;
+      const location = exp.location || exp.geo_location ||
+        (exp.companyLocation && typeof exp.companyLocation === 'string' ? exp.companyLocation : null) || null;
 
       if (company) {
         const entry = {
@@ -191,7 +225,7 @@ class LinkedInService {
           result.employers.push(entry.company);
         }
 
-        // Track current employer
+        // Track current employer (first current position, or first position if none marked current)
         if (isCurrent && !result.currentEmployer) {
           result.currentEmployer = entry.company;
           result.currentTitle = entry.title;
@@ -199,7 +233,13 @@ class LinkedInService {
       }
     }
 
-    // If no current employer found from history, try headline
+    // If no current employer found, use the first position (most recent)
+    if (!result.currentEmployer && result.employmentHistory.length > 0) {
+      result.currentEmployer = result.employmentHistory[0].company;
+      result.currentTitle = result.employmentHistory[0].title;
+    }
+
+    // If still no current employer, try headline
     if (!result.currentEmployer && result.headline) {
       const atMatch = result.headline.match(/(?:at|@)\s+(.+?)(?:\s*[\|·]|$)/i);
       if (atMatch) {
@@ -208,14 +248,14 @@ class LinkedInService {
     }
 
     // Extract education
-    const education = profile.education || profile.educations || [];
+    const education = profile.educations || profile.education || [];
     const eduArray = Array.isArray(education) ? education : (education.data || education.values || []);
     for (const edu of eduArray) {
-      if (edu && (edu.school || edu.institution || edu.school_name)) {
+      if (edu && (edu.school || edu.institution || edu.school_name || edu.schoolName)) {
         result.education.push({
-          school: edu.school || edu.institution || edu.school_name,
-          degree: edu.degree || edu.degree_name || null,
-          field: edu.field || edu.field_of_study || null
+          school: edu.school || edu.institution || edu.school_name || edu.schoolName,
+          degree: edu.degree || edu.degree_name || edu.degreeName || null,
+          field: edu.field || edu.field_of_study || edu.fieldOfStudy || null
         });
       }
     }
@@ -448,6 +488,15 @@ class LinkedInService {
       `"${cleanedName}" site:linkedin.com/in optometrist`,
       `"${cleanedName}" site:linkedin.com/in OD`
     ];
+
+    // If name has a middle initial/name, also search without it
+    // e.g., "Richard A. Cross" → also try "Richard Cross"
+    const nameParts = cleanedName.split(/\s+/);
+    if (nameParts.length >= 3) {
+      const shortName = `${nameParts[0]} ${nameParts[nameParts.length - 1]}`;
+      console.log(`    🔍 Also trying without middle name: "${shortName}"`);
+      queries.push(`"${shortName}" site:linkedin.com/in optometrist`);
+    }
 
     for (const query of queries) {
       const data = await this.makeRequest(query, 10);

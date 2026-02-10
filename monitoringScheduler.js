@@ -369,6 +369,27 @@ class MonitoringScheduler {
   }
 
   /**
+   * Enrich a client company on-demand, with caching
+   * Called per-candidate; skips if already enriched this run
+   */
+  async ensureClientEnriched(clientName) {
+    if (!clientName) return;
+    if (!this._enrichedClients) this._enrichedClients = new Set();
+    if (this._enrichedClients.has(clientName)) return;
+    this._enrichedClients.add(clientName);
+
+    if (this.googleSearch && this.googleSearch.apiKey) {
+      try {
+        console.log(`    🌐 Enriching client: ${clientName}`);
+        await this.enrichClientFromWebsite(clientName);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (e) {
+        console.log(`    ⚠️ Error enriching ${clientName}: ${e.message}`);
+      }
+    }
+  }
+
+  /**
    * Check a single candidate through all sources: Pipeline → NPI → Google → LinkedIn
    * Google runs before LinkedIn to save Netrows credits when Google finds a match
    * Returns per-candidate results
@@ -377,6 +398,9 @@ class MonitoringScheduler {
     const clientName = submission.client_name || '';
     const jobTitle = submission.job_title || '';
     const candidateResults = { pipeline: false, npi: false, linkedin: false, google: false };
+
+    // --- Client Enrichment (cached after first lookup per client) ---
+    await this.ensureClientEnriched(clientName);
 
     // --- Pipeline ---
     if (!this.alertExists(candidate.id, clientName, 'Pipeline')) {
@@ -750,34 +774,13 @@ class MonitoringScheduler {
         }
       }
 
-      // ═══════════════════════════════════════════════════════════════
-      // PRE-STEP: Client Company Enrichment
-      // Google search each client → find their website → scrape practices/locations pages
-      // to build a database of practice names and addresses for matching
-      // ═══════════════════════════════════════════════════════════════
-      const uniqueClients = [...new Set(hiredCandidates.map(h => h.submission.client_name).filter(Boolean))];
-
-      console.log(`\n══════════════════════════════════════════════════════════════════`);
-      console.log(`  CLIENT COMPANY ENRICHMENT`);
-      console.log(`  Scraping ${uniqueClients.length} client website(s) for practice names & locations`);
-      console.log(`══════════════════════════════════════════════════════════════════\n`);
-
-      if (this.googleSearch && this.googleSearch.apiKey) {
-        for (const clientName of uniqueClients) {
-          try {
-            await this.enrichClientFromWebsite(clientName);
-            await new Promise(resolve => setTimeout(resolve, 500));
-          } catch (e) {
-            console.log(`    ⚠️ Error enriching ${clientName}: ${e.message}`);
-          }
-        }
-      } else {
-        console.log(`  ⚠️ Skipping enrichment - no Google Search API key`);
-      }
+      // Client enrichment runs per-candidate (cached after first lookup)
+      this._enrichedClients = new Set();
 
       console.log(`\n══════════════════════════════════════════════════════════════════`);
       console.log(`  CANDIDATE MONITORING`);
       console.log(`  ${hiredCandidates.length} candidates to check (Pipeline → NPI → Google → LinkedIn)`);
+      console.log(`  Client enrichment runs per-candidate (cached after first lookup)`);
       console.log(`══════════════════════════════════════════════════════════════════\n`);
 
       for (let i = 0; i < hiredCandidates.length; i++) {
