@@ -634,6 +634,43 @@ class MonitoringScheduler {
             }
           }
 
+          // Step 2b: If no direct match and client is a parent company (*),
+          // Google search to check if CMS orgs are subsidiaries of the client
+          if (!matched && clientName.includes('*') && allOrgNames.length > 0 && this.googleSearch && this.googleSearch.apiKey) {
+            const cleanClient = clientName.replace(/\([^)]*\)/g, '').replace(/\s*-\s*[A-Z]{2,6}$/i, '').replace(/[*&]/g, '').trim();
+            for (const orgName of allOrgNames) {
+              if (matched) break;
+              // Clean org name (remove Inc, LLC, etc.)
+              const cleanOrg = orgName.replace(/\b(inc|llc|llp|corp|pc|pllc|pa|psc|ltd)\b\.?/gi, '').replace(/[,.]$/g, '').trim();
+              const query = `"${cleanOrg}" "${cleanClient}"`;
+              console.log(`    🔗 Checking if "${cleanOrg}" is part of "${cleanClient}"...`);
+              try {
+                const searchData = await this.googleSearch.makeRequest(query, 5);
+                if (searchData && searchData.organic && searchData.organic.length > 0) {
+                  // If Google returns results for both names together, they're likely related
+                  const topResults = searchData.organic.slice(0, 3);
+                  for (const r of topResults) {
+                    const text = ((r.title || '') + ' ' + (r.snippet || '')).toLowerCase();
+                    const hasOrg = text.includes(cleanOrg.toLowerCase().split(' ')[0]); // first word of org
+                    const hasClient = text.includes(cleanClient.toLowerCase().split(' ')[0]); // first word of client
+                    if (hasOrg && hasClient) {
+                      matched = true;
+                      matchReason = `CMS organization "${orgName}" confirmed as subsidiary of "${clientName}" via Google Search`;
+                      confidence = 'High';
+                      matchSourceUrl = r.link || '';
+                      // Cache the relationship for future checks
+                      this.companyResearch.addRelationship(cleanClient, cleanOrg);
+                      console.log(`    🚨 Subsidiary confirmed: "${cleanOrg}" → "${cleanClient}"`);
+                      break;
+                    }
+                  }
+                }
+              } catch (e) {
+                console.log(`    ⚠️ Subsidiary check error: ${e.message}`);
+              }
+            }
+          }
+
           // Step 3: If no direct org match, Google search each NPI address
           if (!matched && this.googleSearch && this.googleSearch.apiKey) {
             const addressesToSearch = relevantProvider.allAddresses || [];
