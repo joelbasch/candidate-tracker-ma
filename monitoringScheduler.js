@@ -154,7 +154,8 @@ class MonitoringScheduler {
     ]);
 
     // Step 1: Find the client's OFFICIAL website first
-    const searchData = await this.googleSearch.makeRequest(`"${clientName}" official site`, 10);
+    // Include "optometry" in search to bias toward the right industry
+    const searchData = await this.googleSearch.makeRequest(`"${clientName}" optometry OR optometrist OR "eye care"`, 10);
 
     let clientWebsite = null;
     let clientDomain = null;
@@ -167,7 +168,7 @@ class MonitoringScheduler {
         try {
           const url = new URL(r.link);
           const host = url.hostname.replace('www.', '').toLowerCase();
-          const hostNorm = host.replace(/[^a-z0-9]/g, '').replace(/(com|org|net|io)$/, '');
+          const hostNorm = host.replace(/[^a-z0-9]/g, '').replace(/(com|org|net|io|co|us|gg|biz|info)$/, '');
 
           // Skip blacklisted domains (job boards, social media, directories)
           if (blacklistedDomains.has(hostNorm) || blacklistedDomains.has(host.split('.')[0])) {
