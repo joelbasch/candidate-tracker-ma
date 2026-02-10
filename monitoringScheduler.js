@@ -122,7 +122,7 @@ class MonitoringScheduler {
   createAlert(alertData) {
     if (!this.db.data.alerts) this.db.data.alerts = [];
     const alert = {
-      id: Date.now() + Math.random(),
+      id: Date.now() + Math.floor(Math.random() * 1000),
       status: 'pending',
       created_at: new Date().toISOString(),
       ...alertData

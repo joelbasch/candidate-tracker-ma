@@ -171,7 +171,7 @@ class CompanyResearchService {
     const norm1 = this.normalize(company1);
     const norm2 = this.normalize(company2);
 
-    if (!norm1 || !norm2) return false;
+    if (!norm1 || !norm2) return { match: false, reason: null };
 
     // Direct match
     if (norm1 === norm2) return { match: true, reason: 'Direct match' };

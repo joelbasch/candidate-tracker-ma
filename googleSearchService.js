@@ -322,7 +322,7 @@ class GoogleSearchService {
           title: item.title || '',
           snippet: item.snippet || '',
           link: item.link || '',
-          displayLink: item.link ? new URL(item.link).hostname : '',
+          displayLink: (() => { try { return item.link ? new URL(item.link).hostname : ''; } catch (e) { return ''; } })(),
           source: 'organic',
           position: item.position,
           date: item.date || null  // Serper sometimes returns publication date
@@ -402,33 +402,26 @@ class GoogleSearchService {
     if (companyResearch && typeof companyResearch.getAllRelationships === 'function') {
       try {
         const allRelationships = companyResearch.getAllRelationships();
-        // FIX: getAllRelationships() returns { manual: [...], cached: [...] }, not an array
-        let relEntries = [];
-        if (Array.isArray(allRelationships)) {
-          relEntries = allRelationships;
-        } else if (allRelationships && typeof allRelationships === 'object') {
-          const manual = allRelationships.manual || [];
-          const cached = allRelationships.cached || [];
-          if (Array.isArray(manual)) relEntries.push(...manual);
-          if (Array.isArray(cached)) relEntries.push(...cached);
-        }
-
-        for (const rel of relEntries) {
-          if (!rel) continue;
-          const parentName = rel.parent || rel.parentCompany || '';
-          const subs = rel.subsidiaries || rel.aliases || rel.children || [];
-          const normParent = normalizeForSearch(parentName);
-          const subsArray = Array.isArray(subs) ? subs : [];
-
-          const isRelevant = normParent === normClient ||
-            subsArray.some(s => normalizeForSearch(s) === normClient);
-
-          if (isRelevant) {
-            namesToCheck.push(normParent);
-            for (const sub of subsArray) {
-              namesToCheck.push(normalizeForSearch(sub));
+        // getAllRelationships() returns { manual: { parent: [subs] }, cached: { parent: [subs] } }
+        const processRelObject = (relObj) => {
+          if (!relObj || typeof relObj !== 'object') return;
+          for (const [parent, subs] of Object.entries(relObj)) {
+            const normParent = normalizeForSearch(parent);
+            const subsArray = Array.isArray(subs) ? subs : [];
+            const isRelevant = normParent === normClient ||
+              subsArray.some(s => normalizeForSearch(s) === normClient);
+            if (isRelevant) {
+              namesToCheck.push(normParent);
+              for (const sub of subsArray) {
+                namesToCheck.push(normalizeForSearch(sub));
+              }
             }
           }
+        };
+
+        if (allRelationships && typeof allRelationships === 'object') {
+          processRelObject(allRelationships.manual);
+          processRelObject(allRelationships.cached);
         }
       } catch (e) {
         console.log(`    ⚠️ Error getting company relationships: ${e.message}`);

@@ -95,8 +95,7 @@
                 if (alertFilter === 'pipeline') {
                     filtered = filtered.filter(a => a.source?.includes('Pipeline'));
                 } else if (alertFilter === 'npi') {
-                    filtered = filtered.filter(a => a.source_type === 'npi' || 
-                        (a.source && !a.source.includes('Pipeline') && a.source !== 'Google Search' && a.source !== 'LinkedIn'));
+                    filtered = filtered.filter(a => a.source === 'NPI Registry' || a.source?.includes('NPI'));
                 } else if (alertFilter === 'google_search') {
                     filtered = filtered.filter(a => a.source === 'Google Search');
                 } else if (alertFilter === 'linkedin') {
@@ -297,8 +296,7 @@
             // Total in pipeline = unique candidates that have at least one submission
             const candidatesWithSubmissions = [...new Set(submissions.map(s => s.candidate_id))].length;
             const pendingAlerts = alerts.filter(a => a.status === 'pending').length;
-            const npiAlerts = alerts.filter(a => a.source_type === 'npi' || 
-                (a.source && !a.source.includes('Pipeline') && a.source !== 'Google Search' && a.source !== 'LinkedIn')).length;
+            const npiAlerts = alerts.filter(a => a.source === 'NPI Registry' || a.source?.includes('NPI')).length;
             const googleSearchAlerts = alerts.filter(a => a.source === 'Google Search').length;
             const linkedinAlerts = alerts.filter(a => a.source === 'LinkedIn').length;
 
@@ -445,12 +443,13 @@
                                             <option value="pipeline">Source: CRM Pipeline</option>
                                             <option value="npi">Source: NPI</option>
                                             <option value="google_search">Source: Google Search</option>
+                                            <option value="linkedin">Source: LinkedIn</option>
                                         </select>
                                     </div>
                                 </div>
 
-                                {/* Alert Stats - now with 6 columns */}
-                                <div className="grid grid-cols-6 gap-3 mb-6">
+                                {/* Alert Stats */}
+                                <div className="grid grid-cols-7 gap-3 mb-6">
                                     <div onClick={() => setAlertFilter('all')} className={`p-3 rounded-lg cursor-pointer ${alertFilter === 'all' ? 'bg-blue-100 border-2 border-blue-400' : 'bg-white border'}`}>
                                         <p className="text-xs text-gray-500">Total</p>
                                         <p className="text-xl font-bold">{alerts.length}</p>

@@ -470,7 +470,7 @@ class LinkedInService {
               url: link,
               title: result.title || '',
               snippet: result.snippet || '',
-              displayLink: new URL(link).hostname
+              displayLink: (() => { try { return new URL(link).hostname; } catch (e) { return ''; } })()
             },
             score
           });
@@ -706,32 +706,26 @@ class LinkedInService {
         const allRels = companyResearch.getAllRelationships();
         // FIX: getAllRelationships() returns { manual: [...], cached: [...] }, not an array
         // Extract relationships from both manual and cached sources
-        let relEntries = [];
-        if (Array.isArray(allRels)) {
-          relEntries = allRels;
-        } else if (allRels && typeof allRels === 'object') {
-          // Handle the { manual: [...], cached: [...] } format
-          const manual = allRels.manual || [];
-          const cached = allRels.cached || [];
-          if (Array.isArray(manual)) relEntries.push(...manual);
-          if (Array.isArray(cached)) relEntries.push(...cached);
-        }
-
-        for (const rel of relEntries) {
-          if (!rel) continue;
-          const parentName = rel.parent || rel.parentCompany || '';
-          const subs = rel.subsidiaries || rel.aliases || rel.children || [];
-          const normParent = normalize(parentName);
-          const subsArray = Array.isArray(subs) ? subs : [];
-
-          const isRelevant = normParent === normClient ||
-            subsArray.some(s => normalize(s) === normClient);
-          if (isRelevant) {
-            namesToCheck.push(normParent);
-            for (const sub of subsArray) {
-              namesToCheck.push(normalize(sub));
+        // getAllRelationships() returns { manual: { parent: [subs] }, cached: { parent: [subs] } }
+        const processRelObject = (relObj) => {
+          if (!relObj || typeof relObj !== 'object') return;
+          for (const [parent, subs] of Object.entries(relObj)) {
+            const normParent = normalize(parent);
+            const subsArray = Array.isArray(subs) ? subs : [];
+            const isRelevant = normParent === normClient ||
+              subsArray.some(s => normalize(s) === normClient);
+            if (isRelevant) {
+              namesToCheck.push(normParent);
+              for (const sub of subsArray) {
+                namesToCheck.push(normalize(sub));
+              }
             }
           }
+        };
+
+        if (allRels && typeof allRels === 'object') {
+          processRelObject(allRels.manual);
+          processRelObject(allRels.cached);
         }
       } catch (e) { /* ignore */ }
     }
