@@ -799,17 +799,19 @@ class LinkedInService {
     // CHECK 1: Current employer direct match
     if (profileData.currentEmployer) {
       const normEmployer = normalize(profileData.currentEmployer);
-      for (const name of uniqueNames) {
-        if (normEmployer.includes(name) || name.includes(normEmployer)) {
-          return {
-            match: true,
-            matchType: 'current_employer',
-            confidence: 'High',
-            reason: `LinkedIn: Current employer "${profileData.currentEmployer}" matches "${clientName}"`,
-            employer: profileData.currentEmployer,
-            title: profileData.currentTitle,
-            profileUrl: profileData.profileUrl
-          };
+      if (normEmployer.length > 2) { // Skip empty/tiny normalized names like "Inc" → ""
+        for (const name of uniqueNames) {
+          if (normEmployer.includes(name) || name.includes(normEmployer)) {
+            return {
+              match: true,
+              matchType: 'current_employer',
+              confidence: 'High',
+              reason: `LinkedIn: Current employer "${profileData.currentEmployer}" matches "${clientName}"`,
+              employer: profileData.currentEmployer,
+              title: profileData.currentTitle,
+              profileUrl: profileData.profileUrl
+            };
+          }
         }
       }
     }
@@ -818,6 +820,7 @@ class LinkedInService {
     if (profileData.employmentHistory && profileData.employmentHistory.length > 0) {
       for (const job of profileData.employmentHistory) {
         const normEmployer = normalize(job.company);
+        if (normEmployer.length <= 2) continue; // Skip empty/tiny normalized names
         for (const name of uniqueNames) {
           if (normEmployer.includes(name) || name.includes(normEmployer)) {
             const dates = [job.startDate, job.endDate || 'Present'].filter(Boolean).join(' - ');
@@ -840,6 +843,7 @@ class LinkedInService {
     else if (profileData.employers && profileData.employers.length > 0) {
       for (const employer of profileData.employers) {
         const normEmployer = normalize(employer);
+        if (normEmployer.length <= 2) continue; // Skip empty/tiny normalized names
         for (const name of uniqueNames) {
           if (normEmployer.includes(name) || name.includes(normEmployer)) {
             const isCurrent = normalize(profileData.currentEmployer || '') === normEmployer;
