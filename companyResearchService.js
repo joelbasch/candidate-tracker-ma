@@ -204,8 +204,15 @@ class CompanyResearchService {
     }
 
     // Check for common significant words (at least 5 chars)
-    const words1 = norm1.split(' ').filter(w => w.length >= 5);
-    const words2 = norm2.split(' ').filter(w => w.length >= 5);
+    // Exclude generic industry words that would cause false positives in eye care
+    const stopWords = new Set([
+      'vision', 'optical', 'eyecare', 'associates', 'partners', 'group',
+      'center', 'centre', 'clinic', 'practice', 'health', 'healthcare',
+      'medical', 'professional', 'services', 'management', 'national',
+      'american', 'family', 'premier', 'advanced', 'specialty', 'comprehensive'
+    ]);
+    const words1 = norm1.split(' ').filter(w => w.length >= 5 && !stopWords.has(w));
+    const words2 = norm2.split(' ').filter(w => w.length >= 5 && !stopWords.has(w));
     
     for (const w1 of words1) {
       for (const w2 of words2) {

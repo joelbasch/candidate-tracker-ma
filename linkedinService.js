@@ -185,7 +185,9 @@ class LinkedInService {
     const formatDate = (dateVal) => {
       if (!dateVal) return null;
       if (typeof dateVal === 'string') return dateVal;
-      if (typeof dateVal === 'object' && dateVal.year) {
+      if (typeof dateVal === 'object') {
+        // Netrows uses {year, month, day} — year 0 means "not set" (i.e. present/current)
+        if (!dateVal.year || dateVal.year <= 0) return null;
         const y = dateVal.year;
         const m = dateVal.month ? String(dateVal.month).padStart(2, '0') : null;
         const d = dateVal.day && dateVal.day > 0 ? String(dateVal.day).padStart(2, '0') : null;
