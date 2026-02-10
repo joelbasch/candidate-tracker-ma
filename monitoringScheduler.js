@@ -416,16 +416,29 @@ class MonitoringScheduler {
     }
 
     // Step 4: Register all discovered names as aliases for this client
+    // Quality filter: only register names that look like real practice names
     const allNames = [...practiceNames];
     for (const loc of practiceLocations) {
       if (!allNames.includes(loc.name)) allNames.push(loc.name);
     }
 
-    if (allNames.length > 0 && this.companyResearch && typeof this.companyResearch.addRelationship === 'function') {
-      for (const name of allNames) {
+    // Filter out low-quality names before registering
+    const qualityNames = allNames.filter(name => {
+      const words = name.trim().split(/\s+/);
+      // Must be at least 2 words (single words are too generic for alias matching)
+      if (words.length < 2) return false;
+      // Must be reasonable length (not a sentence)
+      if (words.length > 5 || name.length > 60) return false;
+      // Must start with a capital letter (proper noun)
+      if (!/^[A-Z]/.test(name)) return false;
+      return true;
+    });
+
+    if (qualityNames.length > 0 && this.companyResearch && typeof this.companyResearch.addRelationship === 'function') {
+      for (const name of qualityNames) {
         this.companyResearch.addRelationship(clientName, name);
       }
-      console.log(`    ✅ Registered ${allNames.length} practice name(s) as aliases for "${clientName}"`);
+      console.log(`    ✅ Registered ${qualityNames.length} practice name(s) as aliases for "${clientName}"`);
     }
 
     // Store practice locations for address matching during NPI check
@@ -483,7 +496,16 @@ class MonitoringScheduler {
       'about us', 'contact', 'appointment', 'schedule', 'details', 'statement',
       'pediatric', 'exams', 'our team', 'our doctor', 'find a', 'learn more',
       'read more', 'click here', 'request', 'patient', 'insurance', 'hours',
-      'home', 'sitemap', 'accessibility', 'careers', 'faq', 'review'];
+      'home', 'sitemap', 'accessibility', 'careers', 'faq', 'review',
+      // Social media / promotional junk from snippets
+      'instagram', 'facebook', 'twitter', 'youtube', 'tiktok', 'pinterest',
+      'linkedin', 'snapchat', 'follow', 'share', 'like us',
+      // Question/action words that appear in article titles, not practice names
+      'should', 'would', 'could', 'sell', 'join', 'apply', 'hiring', 'looking',
+      'best', 'worst', 'top', 'how to', 'what is', 'why', 'when',
+      // Generic descriptors that aren't practice names
+      'brand name', 'complete list', 'all locations', 'near me', 'near you',
+      'directory', 'listing', 'results', 'showing'];
     const filtered = [...names].filter(name => {
       const lower = name.toLowerCase();
       const words = name.split(/\s+/);
@@ -764,9 +786,21 @@ class MonitoringScheduler {
                   // Clean client name for matching (strip *, (NC), - ECVA, etc.)
                   const cleanClient = clientName.replace(/\([^)]*\)/g, '').replace(/\s*-\s*[A-Z]{2,6}$/i, '').replace(/[*&]/g, '').trim();
 
+                  // Domains whose titles are generic (doctor directories) — skip title matching for these
+                  const directoryDomains = ['webmd', 'healthgrades', 'zocdoc', 'vitals', 'npidb',
+                    'yelp', 'yellowpages', 'mapquest', 'facebook', 'linkedin', 'instagram',
+                    'bbb', 'manta', 'crunchbase', 'indeed', 'glassdoor', 'wikipedia'];
+
                   for (const result of allResults) {
-                    const titleCheck = this.companyResearch.areCompaniesRelated(result.title, cleanClient);
-                    if (titleCheck.match) {
+                    // Skip title matching for directory/review sites — their titles contain
+                    // generic words like "Optometry" that cause false positives
+                    const resultHost = (() => {
+                      try { return new URL(result.link).hostname.toLowerCase(); } catch (e) { return ''; }
+                    })();
+                    const isDirectory = directoryDomains.some(d => resultHost.includes(d));
+
+                    const titleCheck = !isDirectory && this.companyResearch.areCompaniesRelated(result.title, cleanClient);
+                    if (titleCheck && titleCheck.match) {
                       matched = true;
                       matchReason = `Address ${addr.line1}, ${addr.city}, ${addr.state} has "${result.title}" which matches "${clientName}". ${titleCheck.reason}`;
                       confidence = 'High';

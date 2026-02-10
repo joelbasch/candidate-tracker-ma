@@ -195,11 +195,12 @@ class CompanyResearchService {
         if (a1 === a2 && a1.length >= 3) {
           return { match: true, reason: `Related companies: "${company1}" and "${company2}" share alias "${a1}"` };
         }
-        // Partial match on significant words
-        if (a1.length >= 5 && a2.includes(a1)) {
+        // Partial match: alias must be multi-word (2+ words) to do substring matching
+        // Single-word aliases like "eyewear", "optical" are too generic for contains-check
+        if (a1.length >= 5 && a1.includes(' ') && a2.includes(a1)) {
           return { match: true, reason: `"${a2}" contains alias "${a1}"` };
         }
-        if (a2.length >= 5 && a1.includes(a2)) {
+        if (a2.length >= 5 && a2.includes(' ') && a1.includes(a2)) {
           return { match: true, reason: `"${a1}" contains alias "${a2}"` };
         }
       }
@@ -208,8 +209,12 @@ class CompanyResearchService {
     // Check for common significant words (at least 5 chars)
     // Exclude generic industry words and geographic names that cause false positives
     const stopWords = new Set([
-      // Industry terms
-      'vision', 'optical', 'eyecare', 'associates', 'partners', 'group',
+      // Industry terms (eye care specific)
+      'vision', 'optical', 'eyecare', 'eyewear', 'eyeglass', 'eyeglasses',
+      'optometry', 'optometric', 'optometrist', 'ophthalmology', 'ophthalmologist',
+      'ophthalmic', 'optician', 'lenses', 'contacts',
+      // Industry terms (general)
+      'associates', 'partners', 'group',
       'center', 'centre', 'clinic', 'practice', 'health', 'healthcare',
       'medical', 'professional', 'services', 'management', 'national',
       'american', 'family', 'premier', 'advanced', 'specialty', 'comprehensive',
