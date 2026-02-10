@@ -176,6 +176,9 @@ class MonitoringScheduler {
     ];
 
     // Clean client name: strip (NC), - ECVA, *, & for better search and matching
+    // But save the state if present for fallback search
+    const stateMatch = clientName.match(/\(([A-Z]{2})\)/);
+    const clientState = stateMatch ? stateMatch[1] : null;
     const cleanClientName = clientName
       .replace(/\([^)]*\)/g, '')           // Strip (NC), (TX), etc.
       .replace(/\s*-\s*[A-Z]{2,6}$/i, '') // Strip trailing acronyms: - ECVA
@@ -185,15 +188,16 @@ class MonitoringScheduler {
 
     // Step 1: Find the client's OFFICIAL website first
     // Include "optometry" in search to bias toward the right industry
-    const searchData = await this.googleSearch.makeRequest(`"${cleanClientName}" optometry OR optometrist OR "eye care"`, 10);
+    let searchData = await this.googleSearch.makeRequest(`"${cleanClientName}" optometry OR optometrist OR "eye care"`, 10);
 
     let clientWebsite = null;
     let clientDomain = null;
 
-    if (searchData && searchData.organic) {
+    const findWebsiteInResults = async (results) => {
+      if (!results || !results.organic) return false;
       const clientNorm = cleanClientName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-      for (const r of searchData.organic) {
+      for (const r of results.organic) {
         if (!r.link) continue;
         try {
           const url = new URL(r.link);
@@ -216,7 +220,7 @@ class MonitoringScheduler {
           const hasIndustrySignal = industryKeywords.some(kw => snippetAndTitle.includes(kw));
 
           if (!hasIndustrySignal) {
-            // Domain matches but no eye care keywords — fetch homepage to verify
+            // Domain matches but no eye care keywords in snippet — fetch homepage to verify
             console.log(`    🔍 Checking ${host} for eye care content...`);
             try {
               const pageContent = await this.googleSearch.fetchPageContent(`${url.protocol}//${url.hostname}`);
@@ -224,7 +228,7 @@ class MonitoringScheduler {
               const pageHasIndustry = industryKeywords.some(kw => pageLower.includes(kw));
               if (!pageHasIndustry) {
                 console.log(`    ❌ ${host} is not an eye care site, skipping`);
-                continue; // Try next result
+                continue;
               }
             } catch (e) {
               console.log(`    ⚠️ Could not verify ${host}, skipping`);
@@ -235,9 +239,33 @@ class MonitoringScheduler {
           clientWebsite = `${url.protocol}//${url.hostname}`;
           clientDomain = host;
           console.log(`    🌐 Official website: ${clientWebsite}`);
-          break;
+          return true;
         } catch (e) {}
       }
+      return false;
+    };
+
+    await findWebsiteInResults(searchData);
+
+    // Fallback: if no website found and we have a state, try with state name
+    if (!clientWebsite && clientState) {
+      const stateNames = {
+        'AL':'Alabama','AK':'Alaska','AZ':'Arizona','AR':'Arkansas','CA':'California',
+        'CO':'Colorado','CT':'Connecticut','DE':'Delaware','FL':'Florida','GA':'Georgia',
+        'HI':'Hawaii','ID':'Idaho','IL':'Illinois','IN':'Indiana','IA':'Iowa',
+        'KS':'Kansas','KY':'Kentucky','LA':'Louisiana','ME':'Maine','MD':'Maryland',
+        'MA':'Massachusetts','MI':'Michigan','MN':'Minnesota','MS':'Mississippi','MO':'Missouri',
+        'MT':'Montana','NE':'Nebraska','NV':'Nevada','NH':'New Hampshire','NJ':'New Jersey',
+        'NM':'New Mexico','NY':'New York','NC':'North Carolina','ND':'North Dakota','OH':'Ohio',
+        'OK':'Oklahoma','OR':'Oregon','PA':'Pennsylvania','RI':'Rhode Island','SC':'South Carolina',
+        'SD':'South Dakota','TN':'Tennessee','TX':'Texas','UT':'Utah','VT':'Vermont',
+        'VA':'Virginia','WA':'Washington','WV':'West Virginia','WI':'Wisconsin','WY':'Wyoming'
+      };
+      const stateName = stateNames[clientState] || clientState;
+      console.log(`    🔄 Retrying with state: ${stateName}`);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      searchData = await this.googleSearch.makeRequest(`"${cleanClientName}" ${stateName} optometry`, 10);
+      await findWebsiteInResults(searchData);
     }
 
     if (!clientWebsite) {
