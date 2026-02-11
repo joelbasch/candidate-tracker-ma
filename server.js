@@ -37,10 +37,11 @@ const TRACKABLE_STAGES = [
   'started'
 ];
 
-// Configure multer for file uploads
-const upload = multer({ dest: 'uploads/' });
-if (!fs.existsSync('uploads')) {
-    fs.mkdirSync('uploads');
+// Configure multer for file uploads (use DATA_DIR if set for cloud persistence)
+const uploadsDir = path.join(process.env.DATA_DIR || process.env.RENDER_DISK_PATH || '.', 'uploads');
+const upload = multer({ dest: uploadsDir });
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 // Middleware

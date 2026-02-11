@@ -9,7 +9,8 @@ const path = require('path');
 
 class CompanyResearchService {
   constructor() {
-    this.cacheFile = path.join(__dirname, 'company-relationships.json');
+    const dataDir = process.env.DATA_DIR || process.env.RENDER_DISK_PATH || __dirname;
+    this.cacheFile = path.join(dataDir, 'company-relationships.json');
     this.cache = this.loadCache();
     
     // Manual overrides - add known relationships here
