@@ -107,7 +107,7 @@ class DataSyncService {
               }
             }
             
-            this.db.addCandidate(candidate);
+            this.db.insertCandidate(candidate);
             stats.newCandidates++;
           }
           
@@ -135,7 +135,7 @@ class DataSyncService {
           const existingSubmission = this.findExistingSubmission(candidate.id, submission.client_name);
           
           if (!existingSubmission) {
-            this.db.addSubmission({
+            this.db.insertSubmission({
               candidate_id: candidate.id,
               client_name: submission.client_name,
               job_title: submission.job_title,
@@ -286,7 +286,7 @@ class DataSyncService {
    * Update existing candidate
    */
   updateCandidate(candidateId, newData) {
-    const candidate = this.db.getCandidate(candidateId);
+    const candidate = this.db.getCandidateById(candidateId);
     if (!candidate) return;
 
     const updated = { ...candidate };

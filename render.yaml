@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: candidate-tracker
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SERPER_API_KEY
+        sync: false  # Set manually in Render dashboard
+      - key: LOXO_API_KEY
+        sync: false
+      - key: LOXO_AGENCY_SLUG
+        sync: false
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: tracker-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -14,7 +14,7 @@ const DataSyncService = require('./dataSyncService');
 const MonitoringScheduler = require('./monitoringScheduler');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Pipeline stages to track (candidates in these stages should be monitored)
 // These are stages where candidate has been submitted to a client
@@ -37,10 +37,11 @@ const TRACKABLE_STAGES = [
   'started'
 ];
 
-// Configure multer for file uploads
-const upload = multer({ dest: 'uploads/' });
-if (!fs.existsSync('uploads')) {
-    fs.mkdirSync('uploads');
+// Configure multer for file uploads (use DATA_DIR if set for cloud persistence)
+const uploadsDir = path.join(process.env.DATA_DIR || process.env.RENDER_DISK_PATH || '.', 'uploads');
+const upload = multer({ dest: uploadsDir });
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 // Middleware
@@ -275,7 +276,15 @@ app.get('/api/submissions', (req, res) => {
 app.put('/api/alerts/:id', (req, res) => {
   try {
     const alertId = parseInt(req.params.id);
+    if (isNaN(alertId)) {
+      return res.status(400).json({ error: 'Invalid alert ID' });
+    }
+
     const { status, reviewedBy, notes } = req.body;
+    const validStatuses = ['pending', 'confirmed', 'dismissed', 'reviewing'];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+    }
 
     const alert = db.data.alerts.find(a => a.id === alertId);
     if (!alert) {
@@ -541,6 +550,14 @@ app.post('/api/upload/csv', upload.single('file'), (req, res) => {
 app.delete('/api/candidates/:id', (req, res) => {
   try {
     const candidateId = parseInt(req.params.id);
+    if (isNaN(candidateId)) {
+      return res.status(400).json({ error: 'Invalid candidate ID' });
+    }
+
+    const candidate = db.data.candidates.find(c => c.id === candidateId);
+    if (!candidate) {
+      return res.status(404).json({ error: 'Candidate not found' });
+    }
 
     db.data.submissions = db.data.submissions.filter(s => s.candidate_id !== candidateId);
     db.data.alerts = db.data.alerts.filter(a => a.candidate_id !== candidateId);
@@ -599,7 +616,10 @@ app.post('/api/npi/backfill', async (req, res) => {
 // Search NPI by name
 app.get('/api/npi/search/:name', async (req, res) => {
   try {
-    const name = decodeURIComponent(req.params.name);
+    const name = decodeURIComponent(req.params.name).trim();
+    if (!name || name.length < 2) {
+      return res.status(400).json({ error: 'Name must be at least 2 characters' });
+    }
     const results = await npi.searchByName(name);
     res.json(results);
   } catch (error) {

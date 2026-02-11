@@ -5,8 +5,10 @@ const fs = require('fs');
 const path = require('path');
 
 class DatabaseManager {
-  constructor(dbPath = 'tracker-data.json') {
-    this.dbPath = dbPath;
+  constructor(dbPath = null) {
+    // Support RENDER_DISK_PATH for persistent storage on Render.com
+    const dataDir = process.env.DATA_DIR || process.env.RENDER_DISK_PATH || '.';
+    this.dbPath = dbPath || path.join(dataDir, 'tracker-data.json');
     this.data = {
       candidates: [],
       submissions: [],
