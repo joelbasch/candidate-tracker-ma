@@ -424,29 +424,40 @@ class NPIService {
       return { isMatch: true, confidence: 'high', matchType: 'normalized substring' };
     }
 
-    // Token overlap analysis
+    // Token overlap analysis — exclude generic industry terms to avoid false positives
+    const genericTokens = new Set([
+      'eye', 'vision', 'optical', 'eyecare', 'optometry', 'ophthalmology',
+      'medical', 'health', 'healthcare', 'center', 'clinic', 'associates',
+      'group', 'services', 'physicians', 'care', 'family', 'partners',
+      'regional', 'primary', 'practice', 'professional', 'professionals',
+      'doctors', 'wellness', 'institute', 'advanced', 'premier', 'total',
+      'complete', 'general', 'north', 'south', 'east', 'west', 'the',
+      'university', 'hospital'
+    ]);
+
     const empTokens = normEmp.split(/\s+/).filter(t => t.length > 2);
     const cliTokens = normCli.split(/\s+/).filter(t => t.length > 2);
+    const empDistinctive = empTokens.filter(t => !genericTokens.has(t));
+    const cliDistinctive = cliTokens.filter(t => !genericTokens.has(t));
 
     if (empTokens.length === 0 || cliTokens.length === 0) {
       return { isMatch: false };
     }
 
-    let matchingTokens = 0;
-    for (const et of empTokens) {
-      if (cliTokens.some(ct => ct === et || ct.includes(et) || et.includes(ct))) {
-        matchingTokens++;
+    // Count matches on distinctive (non-generic) tokens only
+    let matchingDistinctive = 0;
+    for (const et of empDistinctive) {
+      if (cliDistinctive.some(ct => ct === et || (ct.length >= 5 && et.includes(ct)) || (et.length >= 5 && ct.includes(et)))) {
+        matchingDistinctive++;
       }
     }
 
-    const overlapRatio = matchingTokens / Math.min(empTokens.length, cliTokens.length);
-
-    if (overlapRatio >= 0.7) {
-      return { isMatch: true, confidence: 'medium', matchType: `${Math.round(overlapRatio * 100)}% token overlap` };
-    }
-
-    if (overlapRatio >= 0.5) {
-      return { isMatch: true, confidence: 'low', matchType: `${Math.round(overlapRatio * 100)}% token overlap` };
+    // Require at least 1 distinctive token match
+    if (matchingDistinctive > 0 && empDistinctive.length > 0 && cliDistinctive.length > 0) {
+      const overlapRatio = matchingDistinctive / Math.min(empDistinctive.length, cliDistinctive.length);
+      if (overlapRatio >= 0.7) {
+        return { isMatch: true, confidence: 'medium', matchType: `${Math.round(overlapRatio * 100)}% distinctive token overlap` };
+      }
     }
 
     return { isMatch: false };

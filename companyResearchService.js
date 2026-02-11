@@ -82,7 +82,8 @@ class CompanyResearchService {
       ],
       "Shopko Optical": [
         "shopko",
-        "shopko optical"
+        "shopko optical",
+        "shoptikal"
       ],
       "Clarkson Eyecare": [
         "clarkson",
@@ -165,26 +166,43 @@ class CompanyResearchService {
   }
 
   /**
+   * Generic industry words that should NOT trigger a match on their own.
+   * These are too common in eye care company names.
+   */
+  get stopWords() {
+    return new Set([
+      'vision', 'eye', 'eyecare', 'optical', 'optic', 'optics',
+      'optometry', 'ophthalmology', 'health', 'healthcare',
+      'medical', 'center', 'clinic', 'associates', 'group',
+      'services', 'partners', 'family', 'professional', 'professionals',
+      'primary', 'practice', 'care', 'doctors', 'physician', 'physicians',
+      'wellness', 'institute', 'regional', 'national', 'american',
+      'advanced', 'premier', 'total', 'complete', 'general',
+      'north', 'south', 'east', 'west', 'street', 'cherry'
+    ]);
+  }
+
+  /**
    * Check if two company names are related
    */
   areCompaniesRelated(company1, company2) {
     const norm1 = this.normalize(company1);
     const norm2 = this.normalize(company2);
 
-    if (!norm1 || !norm2) return false;
+    if (!norm1 || !norm2) return { match: false, reason: null };
 
     // Direct match
     if (norm1 === norm2) return { match: true, reason: 'Direct match' };
 
-    // Check if one contains the other (minimum 4 chars)
-    if (norm1.length >= 4 && norm2.includes(norm1)) {
+    // Check if one fully contains the other (minimum 6 chars to avoid short substring false positives)
+    if (norm1.length >= 6 && norm2.includes(norm1)) {
       return { match: true, reason: `"${company2}" contains "${company1}"` };
     }
-    if (norm2.length >= 4 && norm1.includes(norm2)) {
+    if (norm2.length >= 6 && norm1.includes(norm2)) {
       return { match: true, reason: `"${company1}" contains "${company2}"` };
     }
 
-    // Check aliases
+    // Check aliases (from manual relationships and cache only — high confidence)
     const aliases1 = this.getAliases(company1);
     const aliases2 = this.getAliases(company2);
 
@@ -193,25 +211,23 @@ class CompanyResearchService {
         if (a1 === a2 && a1.length >= 3) {
           return { match: true, reason: `Related companies: "${company1}" and "${company2}" share alias "${a1}"` };
         }
-        // Partial match on significant words
-        if (a1.length >= 5 && a2.includes(a1)) {
-          return { match: true, reason: `"${a2}" contains alias "${a1}"` };
-        }
-        if (a2.length >= 5 && a1.includes(a2)) {
-          return { match: true, reason: `"${a1}" contains alias "${a2}"` };
-        }
       }
     }
 
-    // Check for common significant words (at least 5 chars)
-    const words1 = norm1.split(' ').filter(w => w.length >= 5);
-    const words2 = norm2.split(' ').filter(w => w.length >= 5);
-    
-    for (const w1 of words1) {
-      for (const w2 of words2) {
-        if (w1 === w2) {
-          return { match: true, reason: `Common word: "${w1}"` };
-        }
+    // Check for common significant words — EXCLUDE generic industry stop words
+    // Require at least 2 matching non-stop words, OR 1 very distinctive word (>= 8 chars)
+    const stopWords = this.stopWords;
+    const words1 = norm1.split(' ').filter(w => w.length >= 4 && !stopWords.has(w));
+    const words2 = norm2.split(' ').filter(w => w.length >= 4 && !stopWords.has(w));
+
+    if (words1.length > 0 && words2.length > 0) {
+      const matchingWords = words1.filter(w1 => words2.some(w2 => w1 === w2));
+
+      if (matchingWords.length >= 2) {
+        return { match: true, reason: `Common words: "${matchingWords.join('", "')}"` };
+      }
+      if (matchingWords.length === 1 && matchingWords[0].length >= 8) {
+        return { match: true, reason: `Distinctive common word: "${matchingWords[0]}"` };
       }
     }
 

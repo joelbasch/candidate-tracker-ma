@@ -124,39 +124,37 @@ class MonitoringScheduler {
       console.log(`Total candidates: ${candidates.length}`);
       console.log(`Total submissions: ${submissions.length}`);
 
-      // First, create alerts for Hired and Negotiation candidates (from CRM pipeline)
+      // Create pipeline alerts only for Hired/Placed/Started (confirmed placements).
+      // Negotiation-stage candidates are tracked for NPI/Google/LinkedIn monitoring
+      // but don't need their own pipeline alerts — the user already knows the stage from CRM.
       console.log(`\n--- Checking Pipeline Stages for Alerts ---`);
-      
+
       for (const submission of submissions) {
         const stage = (submission.pipeline_stage || '').toLowerCase();
         const candidate = candidates.find(c => c.id === submission.candidate_id);
-        
+
         if (!candidate) continue;
 
         const isHired = stage.includes('hired') || stage.includes('placed') || stage.includes('started');
-        const isNegotiation = stage.includes('negotiation') || stage.includes('offer');
-        
-        if (isHired || isNegotiation) {
-          const existingAlert = (this.db.data.alerts || []).find(a => 
-            a.candidate_id === candidate.id && 
+
+        if (isHired) {
+          const existingAlert = (this.db.data.alerts || []).find(a =>
+            a.candidate_id === candidate.id &&
             a.client_name === submission.client_name &&
             a.source?.includes('Pipeline')
           );
 
           if (!existingAlert) {
-            const alertType = isHired ? 'HIRED' : 'NEGOTIATION';
-            console.log(`  🚨 Creating ${alertType} alert: ${candidate.full_name} → ${submission.client_name}`);
-            
+            console.log(`  🚨 Creating HIRED alert: ${candidate.full_name} → ${submission.client_name}`);
+
             const alert = {
               id: Date.now() + Math.random(),
               candidate_id: candidate.id,
               candidate_name: candidate.full_name,
               client_name: submission.client_name,
               source: `Pipeline: ${submission.pipeline_stage}`,
-              confidence: isHired ? 'Confirmed' : 'High',
-              match_details: isHired 
-                ? `${candidate.full_name} was HIRED at ${submission.client_name} - ${submission.job_title}`
-                : `${candidate.full_name} is in NEGOTIATION with ${submission.client_name} - ${submission.job_title}`,
+              confidence: 'Confirmed',
+              match_details: `${candidate.full_name} was HIRED at ${submission.client_name} - ${submission.job_title}`,
               status: 'pending',
               created_at: new Date().toISOString()
             };
@@ -227,16 +225,18 @@ class MonitoringScheduler {
               // Also try to extract from client name
               const clientLocation = this.extractLocation(clientName);
               
-              // Check for employer name match
+              // Check for employer name match (primary signal)
               const employerMatch = this.companyResearch.areCompaniesRelated(employerName, clientName);
-              
-              // Check for location match
+
+              // Check for location match (supplementary context only)
               const locationMatchJob = this.locationsMatch(npiLocation, jobLocation);
               const locationMatchClient = this.locationsMatch(npiLocation, clientLocation);
               const locationMatch = locationMatchJob.match ? locationMatchJob : locationMatchClient;
 
-              // Create alert if employer matches OR location matches
-              if (employerMatch.match || locationMatch.match) {
+              // Only create NPI alerts when there's an EMPLOYER match.
+              // Location-only matches are too noisy (same state != same company).
+              // Location is used to boost confidence when employer also matches.
+              if (employerMatch.match) {
                 const existingAlert = (this.db.data.alerts || []).find(a =>
                   a.candidate_id === candidate.id &&
                   a.client_name === submission.client_name &&
@@ -245,24 +245,21 @@ class MonitoringScheduler {
 
                 if (!existingAlert) {
                   let matchReason = '';
-                  let confidence = 'Medium';
-                  
+                  let confidence = 'High';
+
                   if (employerMatch.match && locationMatch.match) {
                     matchReason = `Employer AND Location match! NPI shows ${relevantProvider.fullName} at "${employerName}" in ${npiLocation.city}, ${npiLocation.state.toUpperCase()}`;
                     confidence = 'High';
-                  } else if (employerMatch.match) {
+                  } else {
                     matchReason = `Employer match: ${employerMatch.reason}`;
                     confidence = 'High';
-                  } else if (locationMatch.match) {
-                    matchReason = `Location match: NPI shows practice in ${npiLocation.city}, ${npiLocation.state.toUpperCase()}. ${locationMatch.reason}`;
-                    confidence = locationMatch.confidence || 'Medium';
                   }
 
                   console.log(`  🚨 NPI MATCH: ${candidate.full_name}`);
                   console.log(`      NPI: ${relevantProvider.npi} - ${npiLocation.city}, ${npiLocation.state.toUpperCase()}`);
                   console.log(`      Job: ${jobTitle}`);
                   console.log(`      Reason: ${matchReason}`);
-                  
+
                   const alert = {
                     id: Date.now() + Math.random(),
                     candidate_id: candidate.id,
